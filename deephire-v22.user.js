@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         vCtrl Deephire v2.1
+// @name         vCtrl Deephire v2.2
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.2
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -15,7 +15,7 @@
 
 (function() {
 	'use strict';
-	const APP_VERSION = '2.1';
+	const APP_VERSION = '2.2';
 
 	const PANEL_ID = 'vctrl-v21-panel';
 	const STYLE_ID = 'vctrl-v21-style';
