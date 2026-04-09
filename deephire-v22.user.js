@@ -82,6 +82,19 @@
 		return Array.from(el.selectedOptions).map(o => (o.value || '').trim()).filter(Boolean);
 	}
 
+	function bindEasyMultiSelect(id) {
+		const el = document.getElementById(id);
+		if (!el || el.dataset.easyMultiBound === '1') return;
+		el.dataset.easyMultiBound = '1';
+		el.addEventListener('mousedown', (e) => {
+			const target = e.target;
+			if (!target || target.tagName !== 'OPTION') return;
+			e.preventDefault();
+			target.selected = !target.selected;
+			el.dispatchEvent(new Event('change', { bubbles: true }));
+		});
+	}
+
 	function isAllowedBySelection(value, selectedList) {
 		const selected = Array.isArray(selectedList) ? selectedList.filter(Boolean) : [];
 		if (!selected.length || selected.includes('不限')) return true;
@@ -1687,6 +1700,9 @@
 		if (!panel) return;
 		if (panel.dataset.vctrlBound === '1') return;
 		panel.dataset.vctrlBound = '1';
+
+		bindEasyMultiSelect('vctrl-global-education');
+		bindEasyMultiSelect('vctrl-global-experience');
 
 		panel.querySelectorAll('.vctrl-tab').forEach(t => {
 			t.addEventListener('click', () => switchTab(t.getAttribute('data-tab')));
