@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         vCtrl Deephire v2.5
+// @name         vCtrl Deephire v2.6
 // @namespace    http://tampermonkey.net/
-// @version      2.5
+// @version      2.6
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -15,7 +15,7 @@
 
 (function() {
 	'use strict';
-	const APP_VERSION = '2.5';
+	const APP_VERSION = '2.6';
 	const GLOBAL_INIT_KEY = '__vctrl_deephire_singleton_initialized__';
 	if (typeof window.vCtrl_Unload_v21 === 'function') {
 		try { window.vCtrl_Unload_v21(); } catch (e) {}
@@ -890,33 +890,17 @@
 				source: 'vCtrl_V21_SendResume'
 			});
 		}
-
-		if (options.moveToHistory === true) {
-			const jd = await V19DB.getJD(encryptId);
-			if (jd) {
-				jd.deliveryStatus = 'delivered';
-				jd.deliveredAt = Date.now();
-				jd.archivedAt = Date.now();
-				jd.archivedBy = options.archivedBy || 'n8n';
-				await V19DB.saveHistoryJD(jd);
-				await V19DB.deleteJD(encryptId);
-			}
-			await refreshCounters();
-			return;
-		}
-
-		const policy = state.v19.deliveryPolicy || 'keep-last';
-		if (policy === 'delete') {
-			await V19DB.deleteJD(encryptId);
-			await refreshCounters();
-			return;
-		}
-
 		const jd = await V19DB.getJD(encryptId);
-		if (!jd) return;
+		if (!jd) {
+			await refreshCounters();
+			return;
+		}
 		jd.deliveryStatus = 'delivered';
 		jd.deliveredAt = Date.now();
-		await V19DB.saveJD(jd);
+		jd.archivedAt = Date.now();
+		jd.archivedBy = options.archivedBy || 'manual';
+		await V19DB.saveHistoryJD(jd);
+		await V19DB.deleteJD(encryptId);
 		await refreshCounters();
 	}
 
@@ -931,7 +915,8 @@
 		if (!initialData.length) return alert('数据库为空！请先去汲取数据。');
 
 		const loopRounds = state.v19.n8nLoopEnabled ? Math.max(1, state.v19.n8nLoopRounds || 1) : 1;
-		const previewTargets = keyword.trim() ? initialData.filter(jd => (jd.title || '').includes(keyword.trim())) : initialData;
+		const previewSorted = sortJDsByMode(initialData, state.v19.dataSort || 'rule');
+		const previewTargets = keyword.trim() ? previewSorted.filter(jd => (jd.title || '').includes(keyword.trim())) : previewSorted;
 		if (!previewTargets.length) return alert('没有找到符合规则的岗位！');
 
 		const MAX_BATCH_SIZE = 10;
@@ -945,7 +930,8 @@
 		let success = 0, skip = 0, fail = 0;
 		for (let round = 1; round <= loopRounds; round++) {
 			const current = await V19DB.getAllJDs();
-			const targets = keyword.trim() ? current.filter(jd => (jd.title || '').includes(keyword.trim())) : current;
+			const sortedCurrent = sortJDsByMode(current, state.v19.dataSort || 'rule');
+			const targets = keyword.trim() ? sortedCurrent.filter(jd => (jd.title || '').includes(keyword.trim())) : sortedCurrent;
 			if (!targets.length) {
 				logMsg(`[n8n] 第 ${round}/${loopRounds} 轮：无可处理岗位，提前结束。`, 'warning');
 				break;
@@ -1094,7 +1080,7 @@
 	}
 
 	window.vCtrl_BatchSendResumes = async function() {
-		const data = await V19DB.getAllJDs();
+		const data = sortJDsByMode(await V19DB.getAllJDs(), state.v19.dataSort || 'rule');
 		if (!data.length) return alert('数据库为空，无可投递岗位！');
 
 		const keyword = prompt('【一键批量投递 (无脑模式)】\n不经过 n8n，直接强行投递库中所有岗位。\n请输入过滤关键词（留空则全部投递）：', '');
@@ -1113,7 +1099,7 @@
 		for (let i = 0; i < runTargets.length; i++) {
 			const jd = runTargets[i];
 			if (btn) btn.innerText = `投递中 (${i + 1}/${runTargets.length})...`;
-			const ok = await window.vCtrl_SendResumeGodMode(jd.encryptId);
+			const ok = await window.vCtrl_SendResumeGodMode(jd.encryptId, { archivedBy: 'batch' });
 			if (ok) success++; else fail++;
 			if (i < runTargets.length - 1) await sleep(2000 + Math.random() * 2000);
 		}
