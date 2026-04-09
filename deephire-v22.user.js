@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         vCtrl Deephire v2.7
+// @name         vCtrl Deephire v2.8
 // @namespace    http://tampermonkey.net/
-// @version      2.7
+// @version      2.8
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -15,7 +15,7 @@
 
 (function() {
 	'use strict';
-	const APP_VERSION = '2.7';
+	const APP_VERSION = '2.8';
 	const GLOBAL_INIT_KEY = '__vctrl_deephire_singleton_initialized__';
 	if (typeof window.vCtrl_Unload_v21 === 'function') {
 		try { window.vCtrl_Unload_v21(); } catch (e) {}
@@ -961,26 +961,40 @@
 				if (btn) btn.innerText = `第${round}/${loopRounds}轮 批审中 (${b + 1}/${totalBatches})...`;
 				logMsg(`[n8n] 第 ${round}/${loopRounds} 轮，发送批次 ${b + 1}/${totalBatches}，共 ${batch.length} 条岗位`, 'info');
 				try {
+					const payloadJobs = batch.map(jd => ({
+						id: jd.encryptId,
+						encryptId: jd.encryptId,
+						title: jd.title || '',
+						company: jd.company || '',
+						salary: jd.salary || '',
+						skills: jd.skills || '',
+						description: jd.description || '',
+						descriptionPreview: (jd.description || '').slice(0, 300),
+						hasDescription: !!(jd.description && jd.description.trim()),
+						timestamp: jd.timestamp || 0
+					}));
+					const jobsBrief = payloadJobs.map((j, idx) => `${idx + 1}. [${j.id}] ${j.title || '未知岗位'} | ${j.company || '未知公司'} | ${j.salary || '薪资未知'} | ${(j.descriptionPreview || '描述为空').replace(/\s+/g, ' ').slice(0, 120)}`).join('\n');
+
 					const res = await nativeFetch(url, {
 						method: 'POST',
 						headers: { 'Content-Type': 'application/json' },
 						body: JSON.stringify({
 							source: 'vCtrl_V22',
+							payloadVersion: '2.8',
 							mode: 'batch-review',
 							round,
 							batchIndex: b + 1,
 							totalBatches,
 							batchSize,
+							jobsCount: payloadJobs.length,
 							responseFormat: 'json-array',
-							instruction: '请返回 JSON 数组，每项包含 id/apply/reason。apply 仅可为 true 或 false。',
-							jobs: batch.map(jd => ({
-								id: jd.encryptId,
-								title: jd.title,
-								company: jd.company,
-								description: jd.description,
-								skills: jd.skills,
-								salary: jd.salary
-							}))
+							strictResponseSchema: {
+								type: 'array',
+								item: { id: 'string', apply: 'boolean', reason: 'string' }
+							},
+							instruction: '请仅返回 JSON 数组。每一项必须包含 id/apply/reason。id 必须等于输入 jobs 中的 id。不要返回单个总判断对象。',
+							jobs: payloadJobs,
+							jobsBrief
 						})
 					});
 					if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -998,7 +1012,13 @@
 						}
 					}
 
-					if (!decisions.length && !globalDecision) throw new Error(`n8n 返回格式无效：未找到决策数组，原始返回片段: ${(rawText || '').slice(0, 140)}`);
+					if (!decisions.length && !globalDecision) throw new Error(`n8n 返回格式无效：未找到决策数组，原始返回片段: ${(rawText || '').slice(0, 220)}`);
+
+					if (globalDecision && batch.length > 1) {
+						logMsg(`[n8n 返回不合规] 第 ${round} 轮第 ${b + 1} 批仅返回单个总判断（无id），本批已跳过，请修正 n8n 返回为数组。`, 'warning');
+						skip += batch.length;
+						continue;
+					}
 
 					const decisionMap = new Map();
 					let positionalDecisions = [];
