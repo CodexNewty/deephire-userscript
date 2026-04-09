@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         vCtrl Deephire
 // @namespace    http://tampermonkey.net/
-// @version      3.6
+// @version      3.7
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -15,7 +15,7 @@
 
 (function() {
 	'use strict';
-	const APP_VERSION = '3.6';
+	const APP_VERSION = '3.7';
 	const GLOBAL_INIT_KEY = '__vctrl_deephire_singleton_initialized__';
 	if (typeof window.vCtrl_Unload_v21 === 'function') {
 		try { window.vCtrl_Unload_v21(); } catch (e) {}
@@ -172,6 +172,7 @@
 			n8nLoopEnabled: false,
 			n8nLoopRounds: 1,
 			forceSendMaxCount: 20,
+			forceSendDirect: true,
 			deliveryPolicy: 'keep-last',
 			n8nUrl: '',
 			aiProfiles: [
@@ -551,6 +552,7 @@
 		setVal('vctrl-delivery-policy', state.v19.deliveryPolicy || 'keep-last');
 		setVal('vctrl-n8n-url', state.v19.n8nUrl || '');
 		setChecked('vctrl-n8n-loop-enabled', !!state.v19.n8nLoopEnabled);
+		setChecked('vctrl-force-send-direct', state.v19.forceSendDirect !== false);
 		setVal('vctrl-n8n-loop-rounds', state.v19.n8nLoopRounds || 1);
 		setVal('vctrl-force-send-max', state.v19.forceSendMaxCount || 20);
 
@@ -572,6 +574,7 @@
 		state.v19.deliveryPolicy = document.getElementById('vctrl-delivery-policy')?.value || 'keep-last';
 		state.v19.n8nUrl = (document.getElementById('vctrl-n8n-url')?.value || '').trim();
 		state.v19.n8nLoopEnabled = !!document.getElementById('vctrl-n8n-loop-enabled')?.checked;
+		state.v19.forceSendDirect = !!document.getElementById('vctrl-force-send-direct')?.checked;
 		state.v19.n8nLoopRounds = Math.max(1, parseInt(document.getElementById('vctrl-n8n-loop-rounds')?.value, 10) || 1);
 		state.v19.forceSendMaxCount = Math.max(1, parseInt(document.getElementById('vctrl-force-send-max')?.value, 10) || 20);
 
@@ -1352,18 +1355,22 @@
 
 		const keyword = prompt('【一键批量投递 (无脑模式)】\n不经过 n8n，直接强行投递库中所有岗位。\n请输入过滤关键词（留空则全部投递）：', '');
 		if (keyword === null) return;
+		const directMode = state.v19.forceSendDirect !== false;
 
 		const keywordTargets = keyword.trim() ? data.filter(jd => (jd.title || '').includes(keyword.trim())) : data;
-		const targets = keywordTargets.filter(jd => passesGlobalRules({
-			title: jd.title || '',
-			description: jd.description || '',
-			education: detailEducation(jd.rawJobDetail, jd.education || ''),
-			experience: detailExperience(jd.rawJobDetail, jd.experience || '')
-		}));
+		const targets = directMode
+			? keywordTargets
+			: keywordTargets.filter(jd => passesGlobalRules({
+				title: jd.title || '',
+				description: jd.description || '',
+				education: detailEducation(jd.rawJobDetail, jd.education || ''),
+				experience: detailExperience(jd.rawJobDetail, jd.experience || '')
+			}));
 		if (!targets.length) return alert('没有找到符合规则的岗位！');
 		const limit = Math.min(targets.length, Math.max(1, state.v19.forceSendMaxCount || 20));
 		const runTargets = targets.slice(0, limit);
-		if (!confirm(`⚠️ 警告：即将执行无脑连发指令！匹配 ${targets.length} 个岗位，本次按上限执行 ${runTargets.length} 个。\n\n为防止封号，系统将强制进行随机休眠。是否继续？`)) return;
+		const modeText = directMode ? '直接投递（忽略全局规则）' : '按全局规则过滤后投递';
+		if (!confirm(`⚠️ 警告：即将执行无脑连发指令！\n执行模式：${modeText}\n匹配 ${targets.length} 个岗位，本次按上限执行 ${runTargets.length} 个。\n\n为防止封号，系统将强制进行随机休眠。是否继续？`)) return;
 
 		const btn = document.getElementById('vctrl-btn-batch-send');
 		if (btn) btn.disabled = true;
@@ -1876,7 +1883,7 @@
 			syncStateFromForm();
 			await saveSettings();
 		};
-		['vctrl-selective-mode','vctrl-auto-filter-toggle','vctrl-fetch-mode','vctrl-fetch-deep-blacklist','vctrl-delivery-policy','vctrl-n8n-url','vctrl-n8n-loop-enabled','vctrl-n8n-loop-rounds','vctrl-force-send-max','vctrl-global-whitelist','vctrl-global-blacklist','vctrl-global-education','vctrl-global-experience','vctrl-setting-shared-max','vctrl-setting-shared-delay']
+		['vctrl-selective-mode','vctrl-auto-filter-toggle','vctrl-fetch-mode','vctrl-fetch-deep-blacklist','vctrl-delivery-policy','vctrl-n8n-url','vctrl-n8n-loop-enabled','vctrl-force-send-direct','vctrl-n8n-loop-rounds','vctrl-force-send-max','vctrl-global-whitelist','vctrl-global-blacklist','vctrl-global-education','vctrl-global-experience','vctrl-setting-shared-max','vctrl-setting-shared-delay']
 			.forEach(id => {
 				const el = document.getElementById(id);
 				if (!el) return;
@@ -2019,6 +2026,7 @@
 						<div class="row" style="margin-top:8px;"><input id="vctrl-setting-shared-max" type="number" min="1" max="500" placeholder="单次上限（通用）"><input id="vctrl-setting-shared-delay" type="number" min="0" max="5000" placeholder="间隔(ms)（通用）"></div>
 						<div style="margin-top:10px;font-size:12px;color:#cdb07a;">n8n 托管投递规则（可选）</div>
 						<label style="font-size:12px;margin-top:6px;"><input type="checkbox" id="vctrl-n8n-loop-enabled"> 循环到结束（默认关闭，关闭时仅发送1批）</label>
+						<label style="font-size:12px;margin-top:6px;"><input type="checkbox" id="vctrl-force-send-direct"> 批量强投默认直接投递（不勾选则按全局规则）</label>
 						<div class="row" style="margin-top:8px;"><input id="vctrl-n8n-loop-rounds" type="number" min="1" max="20" placeholder="托管轮次（默认1）"><input id="vctrl-force-send-max" type="number" min="1" max="500" placeholder="批量强投单次上限"></div>
 						<button id="vctrl-btn-save-settings" class="ok" style="width:100%;margin-top:8px;font-weight:bold;">💾 保存当前配置到数据库</button>
 					</div>
