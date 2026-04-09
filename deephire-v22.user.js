@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         vCtrl Deephire v2.9
+// @name         vCtrl Deephire v3.0
 // @namespace    http://tampermonkey.net/
-// @version      2.9
+// @version      3.0
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -15,7 +15,7 @@
 
 (function() {
 	'use strict';
-	const APP_VERSION = '2.9';
+	const APP_VERSION = '3.0';
 	const GLOBAL_INIT_KEY = '__vctrl_deephire_singleton_initialized__';
 	if (typeof window.vCtrl_Unload_v21 === 'function') {
 		try { window.vCtrl_Unload_v21(); } catch (e) {}
@@ -930,7 +930,8 @@
 		const initialData = await V19DB.getAllJDs();
 		if (!initialData.length) return alert('数据库为空！请先去汲取数据。');
 
-		const loopRounds = state.v19.n8nLoopEnabled ? Math.max(1, state.v19.n8nLoopRounds || 1) : 1;
+		const runToEnd = !!state.v19.n8nLoopEnabled;
+		const loopRounds = runToEnd ? Math.max(1, state.v19.n8nLoopRounds || 1) : 1;
 		const previewSorted = sortJDsByMode(initialData, state.v19.dataSort || 'rule');
 		const previewTargets = keyword.trim() ? previewSorted.filter(jd => (jd.title || '').includes(keyword.trim())) : previewSorted;
 		if (!previewTargets.length) return alert('没有找到符合规则的岗位！');
@@ -938,7 +939,8 @@
 		const MAX_BATCH_SIZE = 10;
 		const previewBatchSize = Math.min(MAX_BATCH_SIZE, previewTargets.length);
 		const previewBatches = Math.ceil(previewTargets.length / previewBatchSize);
-		if (!confirm(`⚠️ 警告：即将启动 n8n 智能托管流水线！\n首轮岗位 ${previewTargets.length} 个，将按每批 ${previewBatchSize} 个发送（共 ${previewBatches} 批）。\n连续投递轮次：${loopRounds}。\n请确保 n8n 处于 Listen 状态！`)) return;
+		const execModeText = runToEnd ? `循环到结束（每轮 ${previewBatches} 批）` : '仅首批试跑（只发 1 批）';
+		if (!confirm(`⚠️ 警告：即将启动 n8n 智能托管流水线！\n首轮岗位 ${previewTargets.length} 个，将按每批 ${previewBatchSize} 个切片。\n执行模式：${execModeText}\n连续投递轮次：${loopRounds}。\n请确保 n8n 处于 Listen 状态！`)) return;
 
 		const btn = document.getElementById('vctrl-btn-n8n-send');
 		if (btn) btn.disabled = true;
@@ -954,13 +956,14 @@
 			}
 			const batchSize = Math.min(MAX_BATCH_SIZE, targets.length);
 			const totalBatches = Math.ceil(targets.length / batchSize);
-			logMsg(`[n8n] 第 ${round}/${loopRounds} 轮总计 ${targets.length} 条，按每批 ${batchSize} 条，共 ${totalBatches} 批。`, 'info');
-			for (let b = 0; b < totalBatches; b++) {
+			const effectiveBatches = runToEnd ? totalBatches : Math.min(totalBatches, 1);
+			logMsg(`[n8n] 第 ${round}/${loopRounds} 轮总计 ${targets.length} 条，按每批 ${batchSize} 条；本轮执行 ${effectiveBatches}/${totalBatches} 批。`, 'info');
+			for (let b = 0; b < effectiveBatches; b++) {
 				const start = b * batchSize;
 				const end = Math.min(start + batchSize, targets.length);
 				const batch = targets.slice(start, end);
-				if (btn) btn.innerText = `第${round}/${loopRounds}轮 批审中 (${b + 1}/${totalBatches})...`;
-				logMsg(`[n8n] 第 ${round}/${loopRounds} 轮，发送批次 ${b + 1}/${totalBatches}，共 ${batch.length} 条岗位`, 'info');
+				if (btn) btn.innerText = `第${round}/${loopRounds}轮 批审中 (${b + 1}/${effectiveBatches})...`;
+				logMsg(`[n8n] 第 ${round}/${loopRounds} 轮，发送批次 ${b + 1}/${effectiveBatches}，共 ${batch.length} 条岗位`, 'info');
 				try {
 					const payloadJobs = batch.map(jd => ({
 						id: jd.encryptId,
@@ -981,7 +984,7 @@
 						headers: { 'Content-Type': 'application/json' },
 						body: JSON.stringify({
 							source: 'vCtrl_V22',
-							payloadVersion: '2.8',
+							payloadVersion: '3.0',
 							mode: 'batch-review',
 							round,
 							batchIndex: b + 1,
@@ -1068,7 +1071,7 @@
 					round = loopRounds;
 					break;
 				}
-				if (b < totalBatches - 1) await sleep(1000 + Math.random() * 700);
+				if (b < effectiveBatches - 1) await sleep(1000 + Math.random() * 700);
 			}
 		}
 
@@ -1729,7 +1732,7 @@
 						<div style="margin-top:8px;font-size:12px;color:#cdb07a;">这一行参数同时作用于 手动投递 与 爬取汲取</div>
 						<div class="row" style="margin-top:8px;"><input id="vctrl-setting-shared-max" type="number" min="1" max="500" placeholder="单次上限（通用）"><input id="vctrl-setting-shared-delay" type="number" min="0" max="5000" placeholder="间隔(ms)（通用）"></div>
 						<div style="margin-top:10px;font-size:12px;color:#cdb07a;">n8n 托管投递规则（可选）</div>
-						<label style="font-size:12px;margin-top:6px;"><input type="checkbox" id="vctrl-n8n-loop-enabled"> 启用多轮托管投递（默认关闭）</label>
+						<label style="font-size:12px;margin-top:6px;"><input type="checkbox" id="vctrl-n8n-loop-enabled"> 循环到结束（默认关闭，关闭时仅发送1批）</label>
 						<div class="row" style="margin-top:8px;"><input id="vctrl-n8n-loop-rounds" type="number" min="1" max="20" placeholder="托管轮次（默认1）"><input id="vctrl-force-send-max" type="number" min="1" max="500" placeholder="批量强投单次上限"></div>
 						<button id="vctrl-btn-save-settings" class="ok" style="width:100%;margin-top:8px;font-weight:bold;">💾 保存当前配置到数据库</button>
 					</div>
