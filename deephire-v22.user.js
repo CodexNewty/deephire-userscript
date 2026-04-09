@@ -989,6 +989,13 @@
 		return { removed, byTitle, byDesc };
 	}
 
+	async function refreshDataDashboardIfOpen() {
+		const modal = document.getElementById(DATA_MODAL_ID);
+		if (!modal || modal.style.display !== 'flex') return;
+		if (state.v19.dataView === 'history') await renderHistoryList();
+		else await renderDataList();
+	}
+
 	window.vCtrl_SendResumeGodMode = async function(encryptId, options = {}) {
 		const jd = await V19DB.getJD(encryptId);
 		const btn = document.getElementById(`vctrl-send-btn-${encryptId}`);
@@ -1299,6 +1306,7 @@
 			btn.disabled = false;
 		}
 		alert(`🎉 n8n 托管任务结束！\n✅ 批准投递: ${success} 份\n🚫 拒绝投递: ${rejected} 份\n⏭️ 跳过(返回不合规/缺失): ${skipped} 份\n❌ 异常中断: ${fail} 份`);
+		await refreshDataDashboardIfOpen();
 	};
 
 	async function testN8nConnection() {
@@ -1374,6 +1382,7 @@
 			btn.disabled = false;
 		}
 		alert(`🎉 批量强投完毕！\n成功: ${success} | 失败: ${fail}`);
+		await refreshDataDashboardIfOpen();
 	};
 
 	window.vCtrl_GenerateAIResumeByRole = async function() {
