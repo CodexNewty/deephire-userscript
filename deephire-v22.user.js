@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         vCtrl Deephire V22
 // @namespace    http://tampermonkey.net/
-// @version      22.0
+// @version      2.0.0
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -24,9 +24,10 @@
 	const V5_STORE_STATS = 'statsStore';
 
 	const V19_DB_NAME = 'vCtrl_JD_Spider_DB';
-	const V19_DB_VERSION = 1;
+	const V19_DB_VERSION = 2;
 	const V19_STORE_CONFIG = 'spiderConfig';
 	const V19_STORE_DATA = 'jdDataStore';
+	const V19_STORE_HISTORY = 'jdHistoryStore';
 
 
 	const FILTER_TEMPLATE = {
@@ -62,6 +63,8 @@
 			deepBlacklist: ['两班倒', '倒班', '单休' ],
 			fetchDelay: 1200,
 			maxFetchCount: 20,
+			dataSort: 'rule',
+			dataView: 'active',
 			deliveryPolicy: 'keep-last',
 			n8nUrl: '',
 			aiProfiles: [
@@ -155,6 +158,7 @@
 				const db = e.target.result;
 				if (!db.objectStoreNames.contains(V19_STORE_CONFIG)) db.createObjectStore(V19_STORE_CONFIG, { keyPath: 'key' });
 				if (!db.objectStoreNames.contains(V19_STORE_DATA)) db.createObjectStore(V19_STORE_DATA, { keyPath: 'encryptId' });
+				if (!db.objectStoreNames.contains(V19_STORE_HISTORY)) db.createObjectStore(V19_STORE_HISTORY, { keyPath: 'encryptId' });
 			};
 		}),
 		getJD: (encryptId) => new Promise((resolve) => {
@@ -184,6 +188,30 @@
 		deleteJD: (encryptId) => new Promise((resolve) => {
 			if (!v19DB) return resolve(false);
 			const req = v19DB.transaction(V19_STORE_DATA, 'readwrite').objectStore(V19_STORE_DATA).delete(encryptId);
+			req.onsuccess = () => resolve(true);
+			req.onerror = () => resolve(false);
+		}),
+		getHistoryJD: (encryptId) => new Promise((resolve) => {
+			if (!v19DB) return resolve(null);
+			const req = v19DB.transaction(V19_STORE_HISTORY, 'readonly').objectStore(V19_STORE_HISTORY).get(encryptId);
+			req.onsuccess = () => resolve(req.result || null);
+			req.onerror = () => resolve(null);
+		}),
+		saveHistoryJD: (data) => new Promise((resolve) => {
+			if (!v19DB) return resolve(false);
+			const req = v19DB.transaction(V19_STORE_HISTORY, 'readwrite').objectStore(V19_STORE_HISTORY).put(data);
+			req.onsuccess = () => resolve(true);
+			req.onerror = () => resolve(false);
+		}),
+		getAllHistoryJDs: () => new Promise((resolve) => {
+			if (!v19DB) return resolve([]);
+			const req = v19DB.transaction(V19_STORE_HISTORY, 'readonly').objectStore(V19_STORE_HISTORY).getAll();
+			req.onsuccess = () => resolve(req.result || []);
+			req.onerror = () => resolve([]);
+		}),
+		clearHistoryJDs: () => new Promise((resolve) => {
+			if (!v19DB) return resolve(false);
+			const req = v19DB.transaction(V19_STORE_HISTORY, 'readwrite').objectStore(V19_STORE_HISTORY).clear();
 			req.onsuccess = () => resolve(true);
 			req.onerror = () => resolve(false);
 		})
@@ -230,6 +258,25 @@
 			v5: state.v5,
 			v19: state.v19
 		});
+	}
+
+	function sortJDsByMode(items, mode = 'rule') {
+		const data = Array.isArray(items) ? items.slice() : [];
+		if (mode === 'name') {
+			data.sort((a, b) => String(a.title || '').localeCompare(String(b.title || ''), 'zh-CN'));
+			return data;
+		}
+		if (mode === 'time') {
+			data.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+			return data;
+		}
+		data.sort((a, b) => {
+			const aDelivered = a.deliveryStatus === 'delivered' ? 1 : 0;
+			const bDelivered = b.deliveryStatus === 'delivered' ? 1 : 0;
+			if (aDelivered !== bDelivered) return aDelivered - bDelivered;
+			return (b.timestamp || 0) - (a.timestamp || 0);
+		});
+		return data;
 	}
 
 	// ======================== UI ========================
@@ -643,7 +690,11 @@
 
 			const t = targets[i];
 			const existed = await V19DB.getJD(t.encryptId);
-			if (existed) { skip++; continue; }
+			const existedHistory = await V19DB.getHistoryJD(t.encryptId);
+			if (existed || existedHistory) {
+				skip++;
+				continue;
+			}
 
 			logMsg(`[抓取] ${t.title}`, 'info');
 			try {
@@ -684,7 +735,7 @@
 		toggleSpiderUI('idle');
 	}
 
-	window.vCtrl_SendResumeGodMode = async function(encryptId) {
+	window.vCtrl_SendResumeGodMode = async function(encryptId, options = {}) {
 		const jd = await V19DB.getJD(encryptId);
 		const btn = document.getElementById(`vctrl-send-btn-${encryptId}`);
 		if (!jd || !jd.rawJobDetail) {
@@ -712,7 +763,7 @@
 			});
 			const json = await res.json();
 			if (json.code === 0) {
-				await handlePostDelivery(encryptId);
+				await handlePostDelivery(encryptId, options);
 				if (btn) {
 					btn.innerText = '✅ 已投递';
 					btn.style.background = '#4caf50';
@@ -740,7 +791,7 @@
 		}
 	};
 
-	async function handlePostDelivery(encryptId) {
+	async function handlePostDelivery(encryptId, options = {}) {
 		const jdForStat = await V19DB.getJD(encryptId);
 		if (jdForStat) {
 			await V5DB.addStat({
@@ -750,6 +801,20 @@
 				timestamp: Date.now(),
 				source: 'vCtrl_V21_SendResume'
 			});
+		}
+
+		if (options.moveToHistory === true) {
+			const jd = await V19DB.getJD(encryptId);
+			if (jd) {
+				jd.deliveryStatus = 'delivered';
+				jd.deliveredAt = Date.now();
+				jd.archivedAt = Date.now();
+				jd.archivedBy = options.archivedBy || 'n8n';
+				await V19DB.saveHistoryJD(jd);
+				await V19DB.deleteJD(encryptId);
+			}
+			await refreshCounters();
+			return;
 		}
 
 		const policy = state.v19.deliveryPolicy || 'keep-last';
@@ -850,7 +915,7 @@
 					}
 					if (decision.apply) {
 						logMsg(`[大脑决策: 🟢 同意投递] ${jd.title || jd.encryptId}，理由: ${decision.reason}`, 'success');
-						const ok = await window.vCtrl_SendResumeGodMode(jd.encryptId);
+						const ok = await window.vCtrl_SendResumeGodMode(jd.encryptId, { moveToHistory: true, archivedBy: 'n8n' });
 						if (ok) success++; else fail++;
 					} else {
 						logMsg(`[大脑决策: 🔴 放弃投递] ${jd.title || jd.encryptId}，理由: ${decision.reason}`, 'warning');
@@ -1035,24 +1100,44 @@
 		logMsg(`已删除 JD: ${encryptId}`, 'success');
 	};
 
+	window.vCtrl_DeleteSingleHistoryJD = async function(encryptId) {
+		if (!encryptId) return;
+		if (!confirm(`确定删除该条历史记录吗？\nID: ${encryptId}`)) return;
+		if (!v19DB) return;
+		const req = v19DB.transaction(V19_STORE_HISTORY, 'readwrite').objectStore(V19_STORE_HISTORY).delete(encryptId);
+		req.onsuccess = async () => {
+			await renderHistoryList();
+			logMsg(`已删除历史记录: ${encryptId}`, 'success');
+		};
+		req.onerror = () => logMsg(`删除历史记录失败: ${encryptId}`, 'error');
+	};
+
+	function getDataSortMode() {
+		const mode = document.getElementById('vctrl-data-sort')?.value || state.v19.dataSort || 'rule';
+		state.v19.dataSort = mode;
+		saveSettings();
+		return mode;
+	}
+
 	async function renderDataList() {
 		const modal = document.getElementById(DATA_MODAL_ID);
 		const container = document.getElementById('vctrl-data-content');
 		if (!modal || !container) return;
 		modal.style.display = 'flex';
+		state.v19.dataView = 'active';
+		document.getElementById('vctrl-data-view-tag').innerText = '当前视图：主库';
+		document.getElementById('vctrl-btn-clear-db').style.display = 'inline-block';
+		document.getElementById('vctrl-btn-clear-history').style.display = 'none';
+		document.getElementById('vctrl-btn-view-main-data').style.display = 'none';
+		document.getElementById('vctrl-btn-view-history').style.display = 'inline-block';
 
-		const data = await V19DB.getAllJDs();
+		let data = await V19DB.getAllJDs();
 		if (!data.length) {
 			container.innerHTML = '<p style="text-align:center; color:#aaa; margin-top: 50px;">数据库为空，快去汲取数据吧~</p>';
 			return;
 		}
-
-		data.sort((a, b) => {
-			const aDelivered = a.deliveryStatus === 'delivered' ? 1 : 0;
-			const bDelivered = b.deliveryStatus === 'delivered' ? 1 : 0;
-			if (aDelivered !== bDelivered) return aDelivered - bDelivered;
-			return (b.timestamp || 0) - (a.timestamp || 0);
-		});
+		document.getElementById('vctrl-data-sort').value = state.v19.dataSort || 'rule';
+		data = sortJDsByMode(data, getDataSortMode());
 		let html = '';
 		const renderLimit = Math.min(data.length, 100);
 		for (let i = 0; i < renderLimit; i++) {
@@ -1079,6 +1164,43 @@
 		container.innerHTML = html;
 	}
 	window.vCtrl_RenderDataList = renderDataList;
+
+	async function renderHistoryList() {
+		const modal = document.getElementById(DATA_MODAL_ID);
+		const container = document.getElementById('vctrl-data-content');
+		if (!modal || !container) return;
+		modal.style.display = 'flex';
+		state.v19.dataView = 'history';
+		document.getElementById('vctrl-data-view-tag').innerText = '当前视图：历史库';
+		document.getElementById('vctrl-btn-clear-db').style.display = 'none';
+		document.getElementById('vctrl-btn-clear-history').style.display = 'inline-block';
+		document.getElementById('vctrl-btn-view-main-data').style.display = 'inline-block';
+		document.getElementById('vctrl-btn-view-history').style.display = 'none';
+
+		let data = await V19DB.getAllHistoryJDs();
+		if (!data.length) {
+			container.innerHTML = '<p style="text-align:center; color:#aaa; margin-top: 50px;">历史库为空。</p>';
+			return;
+		}
+		document.getElementById('vctrl-data-sort').value = state.v19.dataSort || 'rule';
+		data = sortJDsByMode(data, getDataSortMode());
+		let html = '';
+		const renderLimit = Math.min(data.length, 100);
+		for (let i = 0; i < renderLimit; i++) {
+			const item = data[i];
+			html += `<div style="background:#222726;border:1px solid #4a5440;padding:12px;border-radius:6px;margin-bottom:12px;">
+				<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+					<span style="font-weight:bold;color:#d2a64a;font-size:14px;">${item.title || '未知岗位'} <span style="color:#aaa;font-size:12px;font-weight:normal;">(${item.company || '未知公司'})</span></span>
+					<div style="display:flex;align-items:center;gap:8px;"><span style="font-size:11px;color:#b9c7a0;background:#293023;border:1px solid #4a5440;border-radius:10px;padding:2px 8px;">历史记录</span><span style="font-size:12px;color:#74b45f;">${item.salary || '薪资未知'}</span><button style="background:#b7482e;border:none;color:#fff;border-radius:4px;padding:4px 10px;cursor:pointer;" onclick="window.vCtrl_DeleteSingleHistoryJD('${item.encryptId}')">🗑 删除</button></div>
+				</div>
+				<div style="font-size:12px;color:#777;margin-top:4px;">技能要求: ${item.skills || '无'}</div>
+				<div style="font-size:11px;color:#8a8a8a;margin-top:2px;">获取时间: ${new Date(item.timestamp || Date.now()).toLocaleString()} | 归档时间: ${new Date(item.archivedAt || Date.now()).toLocaleString()} | ID: ${item.encryptId}</div>
+				<div style="font-size:13px;color:#bbb;white-space:pre-wrap;margin-top:8px;background:#111;padding:10px;border-radius:4px;max-height:90px;overflow-y:auto;line-height:1.6;">${item.description || ''}</div>
+			</div>`;
+		}
+		if (data.length > 100) html += '<div style="text-align:center;color:#aaa;padding:10px;">仅展示最新 100 条历史记录。</div>';
+		container.innerHTML = html;
+	}
 
 	async function renderWordCloud() {
 		const container = document.getElementById('vctrl-data-content');
@@ -1232,6 +1354,14 @@
 			toggleSpiderUI(isPaused ? 'paused' : 'running');
 		});
 		document.getElementById('vctrl-btn-view-data')?.addEventListener('click', renderDataList);
+		document.getElementById('vctrl-btn-view-history')?.addEventListener('click', renderHistoryList);
+		document.getElementById('vctrl-btn-view-main-data')?.addEventListener('click', renderDataList);
+		document.getElementById('vctrl-data-sort')?.addEventListener('change', async () => {
+			state.v19.dataSort = document.getElementById('vctrl-data-sort')?.value || 'rule';
+			await saveSettings();
+			if (state.v19.dataView === 'history') await renderHistoryList();
+			else await renderDataList();
+		});
 		document.getElementById('vctrl-btn-close-data-modal')?.addEventListener('click', () => {
 			document.getElementById(DATA_MODAL_ID).style.display = 'none';
 		});
@@ -1249,6 +1379,12 @@
 			await refreshCounters();
 			await renderDataList();
 			logMsg('数据库已清空', 'warning');
+		});
+		document.getElementById('vctrl-btn-clear-history')?.addEventListener('click', async () => {
+			if (!confirm('警告：清空所有历史记录不可恢复！确定吗？')) return;
+			await V19DB.clearHistoryJDs();
+			await renderHistoryList();
+			logMsg('历史库已清空', 'warning');
 		});
 		document.getElementById('vctrl-btn-n8n-send')?.addEventListener('click', window.vCtrl_N8nAutoDelivery);
 		document.getElementById('vctrl-btn-batch-send')?.addEventListener('click', window.vCtrl_BatchSendResumes);
@@ -1382,7 +1518,7 @@
 		panel.innerHTML = `
 			<div class="vctrl-header" id="vctrl-drag">
 				<div>
-					<div style="font-weight:bold;color:#d2a64a;">vCtrl V22</div>
+					<div style="font-weight:bold;color:#d2a64a;">vCtrl v2.0.0</div>
 					<div id="vctrl-apply-counter" style="font-size:12px;color:#5beaa7;">已投 0（今 0）</div>
 				</div>
 				<div>
@@ -1447,7 +1583,9 @@
 						<div class="tit">统一设置（数据库持久化）</div>
 						<div style="font-size:12px;color:#9fb2d8;line-height:1.5;">全局白/黑名单会同时作用于手动与爬取；20/1200 等参数也统一在此配置。</div>
 						<div class="row" style="margin-top:8px;"><input id="vctrl-global-whitelist" type="text" placeholder="全局白名单（逗号分隔）"><input id="vctrl-global-blacklist" type="text" placeholder="全局标题黑名单（逗号分隔）"></div>
+						<div style="margin-top:8px;font-size:12px;color:#cdb07a;">上面这一行 20/1200 是 手动投递 参数</div>
 						<div class="row" style="margin-top:8px;"><input id="vctrl-setting-apply-max" type="number" min="1" max="100" placeholder="手动投递单次上限"><input id="vctrl-setting-apply-delay" type="number" min="300" max="5000" placeholder="手动投递间隔(ms)"></div>
+						<div style="margin-top:8px;font-size:12px;color:#cdb07a;">下面这一行 20/1200 是 爬取汲取 参数</div>
 						<div class="row" style="margin-top:8px;"><input id="vctrl-setting-fetch-max" type="number" min="1" max="500" placeholder="爬取单次上限"><input id="vctrl-setting-fetch-delay" type="number" min="0" max="5000" placeholder="爬取间隔(ms)"></div>
 						<button id="vctrl-btn-save-settings" class="ok" style="width:100%;margin-top:8px;font-weight:bold;">💾 保存当前配置到数据库</button>
 					</div>
@@ -1474,14 +1612,18 @@
 		dataModal.innerHTML = `
 			<div class="vctrl-data-box">
 				<div class="vctrl-data-header">
-					<div style="font-weight:bold;color:#d2a64a;">🗄️ 数据库大盘与中央指挥部</div>
+					<div style="font-weight:bold;color:#d2a64a;">🗄️ 数据库大盘与中央指挥部 <span id="vctrl-data-view-tag" style="font-size:12px;color:#aaa;font-weight:normal;">当前视图：主库</span></div>
 					<div class="vctrl-data-actions">
+						<select id="vctrl-data-sort" style="max-width:140px;"><option value="rule">规则排序</option><option value="name">按名字</option><option value="time">按获取时间</option></select>
+						<button id="vctrl-btn-view-history" class="gray">查看历史</button>
+						<button id="vctrl-btn-view-main-data" class="gray" style="display:none;">查看主库</button>
 						<button id="vctrl-btn-n8n-send" class="purple">🧠 n8n 智能流</button>
 						<button id="vctrl-btn-batch-send" class="pink">🚀 批量强投</button>
 						<button id="vctrl-btn-view-cloud" class="warning">大盘词云</button>
 						<button id="vctrl-btn-view-ai-role" class="info">分岗 AI</button>
 						<button id="vctrl-btn-export-json" class="ok">导出 JSON</button>
 						<button id="vctrl-btn-clear-db" class="danger">清空</button>
+						<button id="vctrl-btn-clear-history" class="danger" style="display:none;">清空历史</button>
 						<button id="vctrl-btn-close-data-modal" class="danger">关闭</button>
 					</div>
 				</div>
@@ -1535,6 +1677,7 @@
 		delete window.vCtrl_GenerateAIResume;
 		delete window.vCtrl_DeleteSingleJD;
 		delete window.vCtrl_RenderDataList;
+		delete window.vCtrl_DeleteSingleHistoryJD;
 		delete window.vCtrl_Unload_v21;
 	};
 
@@ -1551,7 +1694,7 @@
 			initCardObserver();
 			startAutoFilter();
 			await refreshCounters();
-			logMsg('V22 启动成功：V5 手动板块 + V19 爬取板块。', 'success');
+			logMsg('v2.0.0 启动成功：V5 手动板块 + V19 爬取板块。', 'success');
 		} catch (e) {
 			console.error('[vCtrl V21] 初始化失败', e);
 		}
