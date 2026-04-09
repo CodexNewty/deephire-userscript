@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         vCtrl Deephire v3.1
+// @name         vCtrl Deephire
 // @namespace    http://tampermonkey.net/
-// @version      3.1
+// @version      3.2
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -15,7 +15,7 @@
 
 (function() {
 	'use strict';
-	const APP_VERSION = '3.1';
+	const APP_VERSION = '3.2';
 	const GLOBAL_INIT_KEY = '__vctrl_deephire_singleton_initialized__';
 	if (typeof window.vCtrl_Unload_v21 === 'function') {
 		try { window.vCtrl_Unload_v21(); } catch (e) {}
@@ -416,8 +416,14 @@
 			panel.style.bottom = 'auto';
 		}
 		panel.style.width = state.uiState.w;
-		panel.style.height = state.uiState.h;
 		panel.classList.toggle('collapsed', !!state.uiState.collapsed);
+		if (state.uiState.collapsed) {
+			panel.style.height = 'auto';
+		} else {
+			panel.style.height = state.uiState.h;
+		}
+		const toggleBtn = document.getElementById('vctrl-btn-toggle');
+		if (toggleBtn) toggleBtn.innerText = state.uiState.collapsed ? '□' : '_';
 	}
 
 	function switchTab(tab) {
@@ -1625,7 +1631,15 @@
 		document.getElementById('vctrl-btn-toggle')?.addEventListener('click', async () => {
 			const p = document.getElementById(PANEL_ID);
 			state.uiState.collapsed = !p.classList.contains('collapsed');
-			p.classList.toggle('collapsed', state.uiState.collapsed);
+			if (state.uiState.collapsed) {
+				p.classList.add('collapsed');
+				p.style.height = 'auto';
+			} else {
+				p.classList.remove('collapsed');
+				p.style.height = state.uiState.h || '640px';
+			}
+			const toggleBtn = document.getElementById('vctrl-btn-toggle');
+			if (toggleBtn) toggleBtn.innerText = state.uiState.collapsed ? '□' : '_';
 			await saveSettings();
 		});
 
@@ -1675,6 +1689,7 @@
 		style.textContent = `
 			#${PANEL_ID}{position:fixed;right:20px;bottom:20px;width:380px;min-height:520px;max-height:88vh;background:#171a16;color:#ecefe7;border:1px solid #3f4738;border-radius:10px;z-index:999999;display:flex;flex-direction:column;overflow:hidden;resize:both;box-shadow:0 8px 24px rgba(0,0,0,.45);font-family:sans-serif}
 			#${PANEL_ID}.collapsed .vctrl-body{display:none}
+			#${PANEL_ID}.collapsed{min-height:unset;resize:none}
 			#${PANEL_ID} .vctrl-header{padding:10px;background:#262b22;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #3f4738;cursor:move}
 			#${PANEL_ID} .vctrl-body{padding:10px;display:flex;flex-direction:column;gap:8px;overflow:auto}
 			#${PANEL_ID} .tabs{display:flex;gap:6px}
