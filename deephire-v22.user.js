@@ -71,6 +71,9 @@
 			maxFetchCount: 20,
 			dataSort: 'rule',
 			dataView: 'active',
+			n8nLoopEnabled: false,
+			n8nLoopRounds: 1,
+			forceSendMaxCount: 20,
 			deliveryPolicy: 'keep-last',
 			n8nUrl: '',
 			aiProfiles: [
@@ -362,6 +365,9 @@
 		setVal('vctrl-fetch-deep-blacklist', state.v19.deepBlacklist.join(', '));
 		setVal('vctrl-delivery-policy', state.v19.deliveryPolicy || 'keep-last');
 		setVal('vctrl-n8n-url', state.v19.n8nUrl || '');
+		setChecked('vctrl-n8n-loop-enabled', !!state.v19.n8nLoopEnabled);
+		setVal('vctrl-n8n-loop-rounds', state.v19.n8nLoopRounds || 1);
+		setVal('vctrl-force-send-max', state.v19.forceSendMaxCount || 20);
 
 		setVal('vctrl-global-whitelist', state.rules.whitelist.join(', '));
 		setVal('vctrl-global-blacklist', state.rules.blacklist.join(', '));
@@ -378,6 +384,9 @@
 		state.v19.deepBlacklist = (document.getElementById('vctrl-fetch-deep-blacklist')?.value || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
 		state.v19.deliveryPolicy = document.getElementById('vctrl-delivery-policy')?.value || 'keep-last';
 		state.v19.n8nUrl = (document.getElementById('vctrl-n8n-url')?.value || '').trim();
+		state.v19.n8nLoopEnabled = !!document.getElementById('vctrl-n8n-loop-enabled')?.checked;
+		state.v19.n8nLoopRounds = Math.max(1, parseInt(document.getElementById('vctrl-n8n-loop-rounds')?.value, 10) || 1);
+		state.v19.forceSendMaxCount = Math.max(1, parseInt(document.getElementById('vctrl-force-send-max')?.value, 10) || 20);
 
 		state.rules.whitelist = (document.getElementById('vctrl-global-whitelist')?.value || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
 		state.rules.blacklist = (document.getElementById('vctrl-global-blacklist')?.value || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
@@ -854,99 +863,110 @@
 		const url = (document.getElementById('vctrl-n8n-url')?.value || '').trim();
 		if (!url) return alert('请先在主面板配置 n8n Webhook 链接！');
 
-		const data = await V19DB.getAllJDs();
-		if (!data.length) return alert('数据库为空！请先去汲取数据。');
-
 		const keyword = prompt('【🧠 n8n 智能托管】\n输入过滤关键词（留空则全量推给 n8n 进行 AI 审核）：', '');
 		if (keyword === null) return;
 
-		const targets = keyword.trim() ? data.filter(jd => (jd.title || '').includes(keyword.trim())) : data;
-		if (!targets.length) return alert('没有找到符合规则的岗位！');
+		const initialData = await V19DB.getAllJDs();
+		if (!initialData.length) return alert('数据库为空！请先去汲取数据。');
+
+		const loopRounds = state.v19.n8nLoopEnabled ? Math.max(1, state.v19.n8nLoopRounds || 1) : 1;
+		const previewTargets = keyword.trim() ? initialData.filter(jd => (jd.title || '').includes(keyword.trim())) : initialData;
+		if (!previewTargets.length) return alert('没有找到符合规则的岗位！');
 
 		const MAX_BATCH_SIZE = 10;
-		const batchSize = Math.min(MAX_BATCH_SIZE, targets.length);
-		const totalBatches = Math.ceil(targets.length / batchSize);
-		if (!confirm(`⚠️ 警告：即将启动 n8n 智能托管流水线！\n总岗位 ${targets.length} 个，将按每批 ${batchSize} 个发送给 n8n（共 ${totalBatches} 批）。\n请确保 n8n 处于 Listen 状态！`)) return;
+		const previewBatchSize = Math.min(MAX_BATCH_SIZE, previewTargets.length);
+		const previewBatches = Math.ceil(previewTargets.length / previewBatchSize);
+		if (!confirm(`⚠️ 警告：即将启动 n8n 智能托管流水线！\n首轮岗位 ${previewTargets.length} 个，将按每批 ${previewBatchSize} 个发送（共 ${previewBatches} 批）。\n连续投递轮次：${loopRounds}。\n请确保 n8n 处于 Listen 状态！`)) return;
 
 		const btn = document.getElementById('vctrl-btn-n8n-send');
 		if (btn) btn.disabled = true;
 
 		let success = 0, skip = 0, fail = 0;
-		for (let b = 0; b < totalBatches; b++) {
-			const start = b * batchSize;
-			const end = Math.min(start + batchSize, targets.length);
-			const batch = targets.slice(start, end);
-			if (btn) btn.innerText = `大脑批审中 (${b + 1}/${totalBatches})...`;
-			logMsg(`[n8n] 发送批次 ${b + 1}/${totalBatches}，共 ${batch.length} 条岗位给 AI 审核`, 'info');
-			try {
-				const res = await nativeFetch(url, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
-						source: 'vCtrl_V22',
-						mode: 'batch-review',
-						batchIndex: b + 1,
-						totalBatches,
-						batchSize,
-						responseFormat: 'json-array',
-						instruction: '请返回 JSON 数组，每项包含 id/apply/reason。apply 仅可为 true 或 false。',
-						jobs: batch.map(jd => ({
-							id: jd.encryptId,
-							title: jd.title,
-							company: jd.company,
-							description: jd.description,
-							skills: jd.skills,
-							salary: jd.salary
-						}))
-					})
-				});
-				if (!res.ok) throw new Error(`HTTP ${res.status}`);
-				const raw = await res.json();
-
-				let decisions = [];
-				if (Array.isArray(raw)) decisions = raw;
-				else if (Array.isArray(raw.results)) decisions = raw.results;
-				else if (Array.isArray(raw.data)) decisions = raw.data;
-				else if (raw && (raw.id || raw.encryptId)) decisions = [raw];
-
-				if (!decisions.length) {
-					throw new Error('n8n 返回格式无效：未找到决策数组');
-				}
-
-				const decisionMap = new Map();
-				decisions.forEach(item => {
-					if (!item || typeof item !== 'object') return;
-					const id = String(item.id || item.encryptId || '').trim();
-					if (!id) return;
-					decisionMap.set(id, {
-						apply: item.apply === true || item.apply === 'true',
-						reason: item.reason || '无'
-					});
-				});
-
-				for (const jd of batch) {
-					const decision = decisionMap.get(String(jd.encryptId));
-					if (!decision) {
-						logMsg(`[大脑决策: ⚪ 缺失] ${jd.title || jd.encryptId} 未返回决策，默认跳过`, 'warning');
-						skip++;
-						continue;
-					}
-					if (decision.apply) {
-						logMsg(`[大脑决策: 🟢 同意投递] ${jd.title || jd.encryptId}，理由: ${decision.reason}`, 'success');
-						const ok = await window.vCtrl_SendResumeGodMode(jd.encryptId, { moveToHistory: true, archivedBy: 'n8n' });
-						if (ok) success++; else fail++;
-					} else {
-						logMsg(`[大脑决策: 🔴 放弃投递] ${jd.title || jd.encryptId}，理由: ${decision.reason}`, 'warning');
-						skip++;
-					}
-				}
-			} catch (e) {
-				logMsg(`[n8n 通信断开] 第 ${b + 1} 批失败: ${e.message}`, 'error');
-				fail += batch.length;
-				alert('n8n 通信中断，流水线已紧急叫停！请检查 n8n 是否启动。');
+		for (let round = 1; round <= loopRounds; round++) {
+			const current = await V19DB.getAllJDs();
+			const targets = keyword.trim() ? current.filter(jd => (jd.title || '').includes(keyword.trim())) : current;
+			if (!targets.length) {
+				logMsg(`[n8n] 第 ${round}/${loopRounds} 轮：无可处理岗位，提前结束。`, 'warning');
 				break;
 			}
-			if (b < totalBatches - 1) await sleep(1000 + Math.random() * 700);
+			const batchSize = Math.min(MAX_BATCH_SIZE, targets.length);
+			const totalBatches = Math.ceil(targets.length / batchSize);
+			for (let b = 0; b < totalBatches; b++) {
+				const start = b * batchSize;
+				const end = Math.min(start + batchSize, targets.length);
+				const batch = targets.slice(start, end);
+				if (btn) btn.innerText = `第${round}/${loopRounds}轮 批审中 (${b + 1}/${totalBatches})...`;
+				logMsg(`[n8n] 第 ${round}/${loopRounds} 轮，发送批次 ${b + 1}/${totalBatches}，共 ${batch.length} 条岗位`, 'info');
+				try {
+					const res = await nativeFetch(url, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({
+							source: 'vCtrl_V22',
+							mode: 'batch-review',
+							round,
+							batchIndex: b + 1,
+							totalBatches,
+							batchSize,
+							responseFormat: 'json-array',
+							instruction: '请返回 JSON 数组，每项包含 id/apply/reason。apply 仅可为 true 或 false。',
+							jobs: batch.map(jd => ({
+								id: jd.encryptId,
+								title: jd.title,
+								company: jd.company,
+								description: jd.description,
+								skills: jd.skills,
+								salary: jd.salary
+							}))
+						})
+					});
+					if (!res.ok) throw new Error(`HTTP ${res.status}`);
+					const raw = await res.json();
+
+					let decisions = [];
+					if (Array.isArray(raw)) decisions = raw;
+					else if (Array.isArray(raw.results)) decisions = raw.results;
+					else if (Array.isArray(raw.data)) decisions = raw.data;
+					else if (raw && (raw.id || raw.encryptId)) decisions = [raw];
+
+					if (!decisions.length) throw new Error('n8n 返回格式无效：未找到决策数组');
+
+					const decisionMap = new Map();
+					decisions.forEach(item => {
+						if (!item || typeof item !== 'object') return;
+						const id = String(item.id || item.encryptId || '').trim();
+						if (!id) return;
+						decisionMap.set(id, {
+							apply: item.apply === true || item.apply === 'true',
+							reason: item.reason || '无'
+						});
+					});
+
+					for (const jd of batch) {
+						const decision = decisionMap.get(String(jd.encryptId));
+						if (!decision) {
+							logMsg(`[大脑决策: ⚪ 缺失] ${jd.title || jd.encryptId} 未返回决策，默认跳过`, 'warning');
+							skip++;
+							continue;
+						}
+						if (decision.apply) {
+							logMsg(`[大脑决策: 🟢 同意投递] ${jd.title || jd.encryptId}，理由: ${decision.reason}`, 'success');
+							const ok = await window.vCtrl_SendResumeGodMode(jd.encryptId, { moveToHistory: true, archivedBy: 'n8n' });
+							if (ok) success++; else fail++;
+						} else {
+							logMsg(`[大脑决策: 🔴 放弃投递] ${jd.title || jd.encryptId}，理由: ${decision.reason}`, 'warning');
+							skip++;
+						}
+					}
+				} catch (e) {
+					logMsg(`[n8n 通信断开] 第 ${round} 轮第 ${b + 1} 批失败: ${e.message}`, 'error');
+					fail += batch.length;
+					alert('n8n 通信中断，流水线已紧急叫停！请检查 n8n 是否启动。');
+					round = loopRounds;
+					break;
+				}
+				if (b < totalBatches - 1) await sleep(1000 + Math.random() * 700);
+			}
 		}
 
 		if (btn) {
@@ -1002,18 +1022,20 @@
 
 		const targets = keyword.trim() ? data.filter(jd => (jd.title || '').includes(keyword.trim())) : data;
 		if (!targets.length) return alert('没有找到符合规则的岗位！');
-		if (!confirm(`⚠️ 警告：即将执行无脑连发指令！目标数量：${targets.length} 个岗位\n\n为防止封号，系统将强制进行随机休眠。是否继续？`)) return;
+		const limit = Math.min(targets.length, Math.max(1, state.v19.forceSendMaxCount || 20));
+		const runTargets = targets.slice(0, limit);
+		if (!confirm(`⚠️ 警告：即将执行无脑连发指令！匹配 ${targets.length} 个岗位，本次按上限执行 ${runTargets.length} 个。\n\n为防止封号，系统将强制进行随机休眠。是否继续？`)) return;
 
 		const btn = document.getElementById('vctrl-btn-batch-send');
 		if (btn) btn.disabled = true;
 
 		let success = 0, fail = 0;
-		for (let i = 0; i < targets.length; i++) {
-			const jd = targets[i];
-			if (btn) btn.innerText = `投递中 (${i + 1}/${targets.length})...`;
+		for (let i = 0; i < runTargets.length; i++) {
+			const jd = runTargets[i];
+			if (btn) btn.innerText = `投递中 (${i + 1}/${runTargets.length})...`;
 			const ok = await window.vCtrl_SendResumeGodMode(jd.encryptId);
 			if (ok) success++; else fail++;
-			if (i < targets.length - 1) await sleep(2000 + Math.random() * 2000);
+			if (i < runTargets.length - 1) await sleep(2000 + Math.random() * 2000);
 		}
 
 		if (btn) {
@@ -1473,7 +1495,7 @@
 			syncStateFromForm();
 			await saveSettings();
 		};
-		['vctrl-selective-mode','vctrl-auto-filter-toggle','vctrl-fetch-mode','vctrl-fetch-deep-blacklist','vctrl-delivery-policy','vctrl-n8n-url','vctrl-global-whitelist','vctrl-global-blacklist','vctrl-setting-shared-max','vctrl-setting-shared-delay']
+		['vctrl-selective-mode','vctrl-auto-filter-toggle','vctrl-fetch-mode','vctrl-fetch-deep-blacklist','vctrl-delivery-policy','vctrl-n8n-url','vctrl-n8n-loop-enabled','vctrl-n8n-loop-rounds','vctrl-force-send-max','vctrl-global-whitelist','vctrl-global-blacklist','vctrl-setting-shared-max','vctrl-setting-shared-delay']
 			.forEach(id => {
 				const el = document.getElementById(id);
 				if (!el) return;
@@ -1603,6 +1625,9 @@
 						<div class="row" style="margin-top:8px;"><input id="vctrl-global-whitelist" type="text" placeholder="全局白名单（逗号分隔）"><input id="vctrl-global-blacklist" type="text" placeholder="全局标题黑名单（逗号分隔）"></div>
 						<div style="margin-top:8px;font-size:12px;color:#cdb07a;">这一行参数同时作用于 手动投递 与 爬取汲取</div>
 						<div class="row" style="margin-top:8px;"><input id="vctrl-setting-shared-max" type="number" min="1" max="500" placeholder="单次上限（通用）"><input id="vctrl-setting-shared-delay" type="number" min="0" max="5000" placeholder="间隔(ms)（通用）"></div>
+						<div style="margin-top:10px;font-size:12px;color:#cdb07a;">n8n 托管投递规则（可选）</div>
+						<label style="font-size:12px;margin-top:6px;"><input type="checkbox" id="vctrl-n8n-loop-enabled"> 启用多轮托管投递（默认关闭）</label>
+						<div class="row" style="margin-top:8px;"><input id="vctrl-n8n-loop-rounds" type="number" min="1" max="20" placeholder="托管轮次（默认1）"><input id="vctrl-force-send-max" type="number" min="1" max="500" placeholder="批量强投单次上限"></div>
 						<button id="vctrl-btn-save-settings" class="ok" style="width:100%;margin-top:8px;font-weight:bold;">💾 保存当前配置到数据库</button>
 					</div>
 				</div>
