@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         vCtrl Deephire v2.6
+// @name         vCtrl Deephire v2.7
 // @namespace    http://tampermonkey.net/
-// @version      2.6
+// @version      2.7
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -15,7 +15,7 @@
 
 (function() {
 	'use strict';
-	const APP_VERSION = '2.6';
+	const APP_VERSION = '2.7';
 	const GLOBAL_INIT_KEY = '__vctrl_deephire_singleton_initialized__';
 	if (typeof window.vCtrl_Unload_v21 === 'function') {
 		try { window.vCtrl_Unload_v21(); } catch (e) {}
@@ -302,6 +302,22 @@
 			return (b.timestamp || 0) - (a.timestamp || 0);
 		});
 		return data;
+	}
+
+	async function migrateDeliveredMainToHistory() {
+		const all = await V19DB.getAllJDs();
+		const delivered = all.filter(item => item && item.deliveryStatus === 'delivered');
+		if (!delivered.length) return 0;
+		let moved = 0;
+		for (const item of delivered) {
+			item.archivedAt = item.archivedAt || Date.now();
+			item.archivedBy = item.archivedBy || 'legacy-migrate';
+			const ok = await V19DB.saveHistoryJD(item);
+			if (!ok) continue;
+			await V19DB.deleteJD(item.encryptId);
+			moved++;
+		}
+		return moved;
 	}
 
 	function tryParseJsonText(text) {
@@ -1230,6 +1246,7 @@
 		const container = document.getElementById('vctrl-data-content');
 		if (!modal || !container) return;
 		modal.style.display = 'flex';
+		await migrateDeliveredMainToHistory();
 		state.v19.dataView = 'active';
 		document.getElementById('vctrl-data-view-tag').innerText = '当前视图：主库';
 		document.getElementById('vctrl-btn-clear-db').style.display = 'inline-block';
@@ -1237,7 +1254,7 @@
 		document.getElementById('vctrl-btn-view-main-data').style.display = 'none';
 		document.getElementById('vctrl-btn-view-history').style.display = 'inline-block';
 
-		let data = await V19DB.getAllJDs();
+		let data = (await V19DB.getAllJDs()).filter(item => item.deliveryStatus !== 'delivered');
 		if (!data.length) {
 			container.innerHTML = '<p style="text-align:center; color:#aaa; margin-top: 50px;">数据库为空，快去汲取数据吧~</p>';
 			return;
@@ -1248,9 +1265,6 @@
 		const renderLimit = Math.min(data.length, 100);
 		for (let i = 0; i < renderLimit; i++) {
 			const item = data[i];
-			const deliveredTag = item.deliveryStatus === 'delivered'
-				? `<span style="font-size:11px;color:#b9c7a0;background:#293023;border:1px solid #4a5440;border-radius:10px;padding:2px 8px;">已投递</span>`
-				: '';
 			const delBtnHtml = `<button style="background:#b7482e;border:none;color:#fff;border-radius:4px;padding:4px 10px;cursor:pointer;" onclick="window.vCtrl_DeleteSingleJD('${item.encryptId}')">🗑 删除</button>`;
 			const btnHtml = item.rawJobDetail
 				? `<button id="vctrl-send-btn-${item.encryptId}" style="background:#6d7f4a;border:none;color:#fff;border-radius:4px;padding:4px 10px;cursor:pointer;" onclick="window.vCtrl_SendResumeGodMode('${item.encryptId}')">🚀 手动直投</button>`
@@ -1259,7 +1273,7 @@
 			html += `<div style="background:#2a2a2a;border:1px solid #444;padding:12px;border-radius:6px;margin-bottom:12px;">
 				<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
 					<span style="font-weight:bold;color:#d2a64a;font-size:14px;">${item.title || '未知岗位'} <span style="color:#aaa;font-size:12px;font-weight:normal;">(${item.company || '未知公司'})</span></span>
-					<div style="display:flex;align-items:center;gap:8px;">${deliveredTag}<span style="font-size:12px;color:#74b45f;">${item.salary || '薪资未知'}</span>${btnHtml}${delBtnHtml}</div>
+					<div style="display:flex;align-items:center;gap:8px;"><span style="font-size:12px;color:#74b45f;">${item.salary || '薪资未知'}</span>${btnHtml}${delBtnHtml}</div>
 				</div>
 				<div style="font-size:12px;color:#777;margin-top:4px;">技能要求: ${item.skills || '无'}</div>
 				<div style="font-size:11px;color:#555;margin-top:2px;">获取时间: ${new Date(item.timestamp || Date.now()).toLocaleString()} | ID: ${item.encryptId}</div>
@@ -1797,6 +1811,7 @@
 			window[GLOBAL_INIT_KEY] = true;
 			injectMainWorldRadar();
 			await Promise.all([V5DB.init(), V19DB.init()]);
+			const migrated = await migrateDeliveredMainToHistory();
 			await loadSettings();
 			injectUI();
 			applyPanelState();
@@ -1806,6 +1821,9 @@
 			initCardObserver();
 			startAutoFilter();
 			await refreshCounters();
+			if (migrated > 0) {
+				logMsg(`兼容迁移完成：${migrated} 条已投递记录已转入历史库。`, 'success');
+			}
 			logMsg(`v${APP_VERSION} 启动成功：V5 手动板块 + V19 爬取板块。`, 'success');
 		} catch (e) {
 			console.error('[vCtrl V21] 初始化失败', e);
