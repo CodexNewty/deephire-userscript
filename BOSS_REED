@@ -1,0 +1,181 @@
+// ==UserScript==
+// @name         Boss直聘自动已读助手 (全真模拟版)
+// @namespace    http://tampermonkey.net/
+// @version      1.3
+// @description  基于自定义规则处理不合适的沟通消息，全真物理按键模拟防拦截
+// @author       浏览器脚本助手 vCtrl
+// @match        https://www.zhipin.com/web/geek/chat*
+// @grant        none
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // 1. 数据库配置
+    const DB_KEY = 'BOSS_HELPER_RULES';
+    const INITIAL_RULES = [
+        "不完全匹配",
+        "不够匹配",
+        "不合适",
+        "感谢你的关注",
+        "祝您在",
+        "找到更合适的机会",
+        "不好意思"
+    ];
+
+    let isProcessing = false;
+
+    // 2. 数据库逻辑
+    const db = {
+        get() {
+            try { return JSON.parse(localStorage.getItem(DB_KEY)); }
+            catch (e) { return null; }
+        },
+        save(rules) {
+            const uniqueRules = Array.from(new Set(rules.map(r => r.trim()).filter(r => r)));
+            localStorage.setItem(DB_KEY, JSON.stringify(uniqueRules));
+            return uniqueRules;
+        },
+        init() {
+            if (!this.get()) this.save(INITIAL_RULES);
+        }
+    };
+
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+    // 3. 核心科技：全真鼠标生命周期模拟器 (破解 Vue/React 事件劫持)
+    function simulateRealMouseClick(element) {
+        if (!element) return;
+
+        // 模拟人类完整的点击动作序列
+        const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+        events.forEach(eventType => {
+            const event = new MouseEvent(eventType, {
+                view: window,
+                bubbles: true,
+                cancelable: true,
+                buttons: 1 // 模拟左键
+            });
+            element.dispatchEvent(event);
+        });
+    }
+
+    // 4. 扫描与执行引擎
+    async function runCleanup() {
+        if (isProcessing) return;
+        const rules = db.get() || [];
+        if (rules.length === 0) return alert("规则库为空，请先添加规则！");
+
+        isProcessing = true;
+        const btn = document.getElementById('helper-run-btn');
+        if (btn) btn.innerText = "原生物理模拟中...";
+
+        // 【状态保护】记住当前正在对话的人
+        const originalActiveItem = document.querySelector('.friend-content.selected');
+
+        const chatItems = document.querySelectorAll('.friend-content');
+        let count = 0;
+
+        for (const item of chatItems) {
+            const badge = item.querySelector('.notice-badge');
+
+            // 只要红点还在，且没被隐藏
+            if (badge && window.getComputedStyle(badge).display !== 'none') {
+                const lastMsg = item.querySelector('.last-msg-text')?.innerText || "";
+                const isMatch = rules.some(r => lastMsg.includes(r));
+
+                if (isMatch) {
+                    console.log(`[vCtrl 命中] 准备模拟点击: ${lastMsg.substring(0, 15)}...`);
+
+                    // 1. 触发全真物理模拟点击，让官方系统误以为是你手动点了一下
+                    simulateRealMouseClick(item);
+
+                    // 2. 必须休眠等待！让官方发出的 200 OK 请求飞一会儿
+                    await sleep(1500 + Math.random() * 800);
+
+                    // 3. 视觉抹除红点
+                    badge.style.setProperty('display', 'none', 'important');
+                    count++;
+                }
+            }
+        }
+
+        // 【状态恢复】瞬间点回你最初选中的对话框
+        if (originalActiveItem) {
+            console.log(`[vCtrl] 队列处理完毕，恢复原始焦点`);
+            simulateRealMouseClick(originalActiveItem);
+        }
+
+        if (btn) btn.innerText = "执行自动化清理";
+        isProcessing = false;
+        console.log(`[vCtrl 助手] 清理完毕！共处理了 ${count} 条拒绝消息。`);
+    }
+
+    // 5. UI 面板渲染
+    function renderUI() {
+        if (document.getElementById('helper-panel')) return;
+
+        const panel = document.createElement('div');
+        panel.id = 'helper-panel';
+        panel.style.cssText = `position:fixed; bottom:20px; right:20px; width:240px; background:#fff; border:1px solid #ddd; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.15); z-index:999999; padding:12px; font-family:sans-serif;`;
+
+        panel.innerHTML = `
+            <div style="font-weight:bold; border-bottom:1px solid #eee; padding-bottom:8px; margin-bottom:10px; display:flex; justify-content:space-between;">
+                <span>已读助手 (全真模拟)</span>
+                <span id="helper-close" style="cursor:pointer; color:#999;">×</span>
+            </div>
+            <div style="display:flex; gap:5px; margin-bottom:10px;">
+                <input id="helper-input" type="text" placeholder="添加新规则..." style="flex:1; border:1px solid #ccc; border-radius:4px; padding:4px; font-size:12px;">
+                <button id="helper-add-btn" style="background:#00bebd; color:#fff; border:none; border-radius:4px; padding:0 8px; cursor:pointer;">添加</button>
+            </div>
+            <div id="helper-list" style="max-height:150px; overflow-y:auto; border:1px solid #f0f0f0; margin-bottom:10px; background:#fafafa; border-radius:4px; padding:5px;"></div>
+            <button id="helper-run-btn" style="width:100%; background:#10b981; color:#fff; border:none; border-radius:4px; padding:8px; cursor:pointer; font-weight:bold; transition: 0.2s;">执行自动化清理</button>
+        `;
+
+        document.body.appendChild(panel);
+
+        const refreshList = () => {
+            const listContainer = document.getElementById('helper-list');
+            const rules = db.get() || [];
+            listContainer.innerHTML = rules.map((r, i) => `
+                <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px; padding:2px 4px; border-bottom:1px solid #eee;">
+                    <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:160px;">${r}</span>
+                    <span class="del-rule" data-index="${i}" style="color:red; cursor:pointer;">移除</span>
+                </div>
+            `).join('');
+
+            document.querySelectorAll('.del-rule').forEach(el => {
+                el.onclick = () => {
+                    const idx = el.getAttribute('data-index');
+                    const current = db.get();
+                    current.splice(idx, 1);
+                    db.save(current);
+                    refreshList();
+                };
+            });
+        };
+
+        document.getElementById('helper-add-btn').onclick = () => {
+            const input = document.getElementById('helper-input');
+            const current = db.get() || [];
+            if (input.value) {
+                db.save([...current, input.value]);
+                input.value = '';
+                refreshList();
+            }
+        };
+
+        document.getElementById('helper-input').addEventListener('keypress', function (e) {
+            if (e.key === 'Enter') document.getElementById('helper-add-btn').click();
+        });
+
+        document.getElementById('helper-run-btn').onclick = runCleanup;
+        document.getElementById('helper-close').onclick = () => panel.style.display = 'none';
+
+        refreshList();
+    }
+
+    // 6. 启动
+    db.init();
+    renderUI();
+})();
