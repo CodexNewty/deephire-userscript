@@ -5,6 +5,10 @@
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
+// @homepageURL  https://github.com/CodexNewty/deephire-userscript
+// @supportURL   https://github.com/CodexNewty/deephire-userscript/issues
+// @updateURL    https://raw.githubusercontent.com/CodexNewty/deephire-userscript/main/deephire-v22.user.js
+// @downloadURL  https://raw.githubusercontent.com/CodexNewty/deephire-userscript/main/deephire-v22.user.js
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
