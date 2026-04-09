@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         vCtrl Deephire v2.2
+// @name         vCtrl Deephire v2.3
 // @namespace    http://tampermonkey.net/
-// @version      2.2
+// @version      2.3
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -15,7 +15,8 @@
 
 (function() {
 	'use strict';
-	const APP_VERSION = '2.2';
+	const APP_VERSION = '2.3';
+	const GLOBAL_INIT_KEY = '__vctrl_deephire_v23_initialized__';
 
 	const PANEL_ID = 'vctrl-v21-panel';
 	const STYLE_ID = 'vctrl-v21-style';
@@ -298,6 +299,52 @@
 			return (b.timestamp || 0) - (a.timestamp || 0);
 		});
 		return data;
+	}
+
+	function tryParseJsonText(text) {
+		if (!text || typeof text !== 'string') return null;
+		const t = text.trim();
+		if (!t) return null;
+		try { return JSON.parse(t); } catch (e) {}
+		const fenced = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+		if (fenced && fenced[1]) {
+			try { return JSON.parse(fenced[1].trim()); } catch (e) {}
+		}
+		const arrStart = t.indexOf('[');
+		const arrEnd = t.lastIndexOf(']');
+		if (arrStart >= 0 && arrEnd > arrStart) {
+			try { return JSON.parse(t.slice(arrStart, arrEnd + 1)); } catch (e) {}
+		}
+		return null;
+	}
+
+	function extractDecisionArray(raw) {
+		if (Array.isArray(raw)) return raw;
+		if (!raw) return [];
+		if (typeof raw === 'string') {
+			const parsed = tryParseJsonText(raw);
+			return extractDecisionArray(parsed);
+		}
+		if (typeof raw === 'object') {
+			if (Array.isArray(raw.results)) return raw.results;
+			if (Array.isArray(raw.data)) return raw.data;
+			if (Array.isArray(raw.items)) return raw.items;
+			if (Array.isArray(raw.output)) return raw.output;
+			if (raw.output && typeof raw.output === 'string') {
+				const parsed = tryParseJsonText(raw.output);
+				return extractDecisionArray(parsed);
+			}
+			if (raw.result && typeof raw.result === 'string') {
+				const parsed = tryParseJsonText(raw.result);
+				return extractDecisionArray(parsed);
+			}
+			if (raw.content && typeof raw.content === 'string') {
+				const parsed = tryParseJsonText(raw.content);
+				return extractDecisionArray(parsed);
+			}
+			if (raw.id || raw.encryptId) return [raw];
+		}
+		return [];
 	}
 
 	// ======================== UI ========================
@@ -921,15 +968,11 @@
 						})
 					});
 					if (!res.ok) throw new Error(`HTTP ${res.status}`);
-					const raw = await res.json();
+					const rawText = await res.text();
+					const parsed = tryParseJsonText(rawText);
+					const decisions = extractDecisionArray(parsed ?? rawText);
 
-					let decisions = [];
-					if (Array.isArray(raw)) decisions = raw;
-					else if (Array.isArray(raw.results)) decisions = raw.results;
-					else if (Array.isArray(raw.data)) decisions = raw.data;
-					else if (raw && (raw.id || raw.encryptId)) decisions = [raw];
-
-					if (!decisions.length) throw new Error('n8n 返回格式无效：未找到决策数组');
+					if (!decisions.length) throw new Error(`n8n 返回格式无效：未找到决策数组，原始返回片段: ${(rawText || '').slice(0, 140)}`);
 
 					const decisionMap = new Map();
 					decisions.forEach(item => {
@@ -1359,6 +1402,8 @@
 	function bindEvents() {
 		const panel = document.getElementById(PANEL_ID);
 		if (!panel) return;
+		if (panel.dataset.vctrlBound === '1') return;
+		panel.dataset.vctrlBound = '1';
 
 		panel.querySelectorAll('.vctrl-tab').forEach(t => {
 			t.addEventListener('click', () => switchTab(t.getAttribute('data-tab')));
@@ -1698,6 +1743,7 @@
 
 	// ======================== Unload & Init ========================
 	window.vCtrl_Unload_v21 = function() {
+		delete window[GLOBAL_INIT_KEY];
 		document.getElementById(PANEL_ID)?.remove();
 		document.getElementById(STYLE_ID)?.remove();
 		document.getElementById(FILTER_MODAL_ID)?.remove();
@@ -1724,6 +1770,8 @@
 
 	async function init() {
 		try {
+			if (window[GLOBAL_INIT_KEY]) return;
+			window[GLOBAL_INIT_KEY] = true;
 			injectMainWorldRadar();
 			await Promise.all([V5DB.init(), V19DB.init()]);
 			await loadSettings();
