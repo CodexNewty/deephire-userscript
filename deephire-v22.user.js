@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         vCtrl Deephire
 // @namespace    http://tampermonkey.net/
-// @version      3.2
+// @version      3.4
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -15,7 +15,7 @@
 
 (function() {
 	'use strict';
-	const APP_VERSION = '3.2';
+	const APP_VERSION = '3.4';
 	const GLOBAL_INIT_KEY = '__vctrl_deephire_singleton_initialized__';
 	if (typeof window.vCtrl_Unload_v21 === 'function') {
 		try { window.vCtrl_Unload_v21(); } catch (e) {}
@@ -45,6 +45,84 @@
 		'公司规模': ['不限', '0-20人', '20-99人', '100-499人', '500-999人', '1000-9999人', '10000人以上'],
 		'学历要求': ['不限', '初中以下', '高中', '中专', '大专', '本科', '硕士', '博士']
 	};
+	const GLOBAL_EDUCATION_OPTIONS = ['不限', '初中以下', '高中', '中专', '大专', '本科', '硕士', '博士'];
+	const GLOBAL_EXPERIENCE_OPTIONS = ['不限', '应届/在校', '1年以内', '1-3年', '3-5年', '5-10年', '10年以上'];
+
+	const STRICT_KICK_KEYWORDS = ['两班倒', '倒班', '外包', '驻场', '兼职', '金融', '调试', '装配', '维修', '急招', '飞行', '游戏'];
+
+	function normalizeKeywordList(list) {
+		return Array.from(new Set((Array.isArray(list) ? list : [])
+			.map(s => String(s || '').trim())
+			.filter(Boolean)));
+	}
+
+	function mergeBaselineKeywords(list) {
+		return normalizeKeywordList([...(Array.isArray(list) ? list : []), ...STRICT_KICK_KEYWORDS]);
+	}
+
+	function hitKeyword(text, keywords) {
+		const content = String(text || '');
+		if (!content) return '';
+		for (const kw of (Array.isArray(keywords) ? keywords : [])) {
+			if (kw && content.includes(kw)) return kw;
+		}
+		return '';
+	}
+
+	function pickMultiSelect(id, values) {
+		const el = document.getElementById(id);
+		if (!el) return;
+		const selected = new Set(Array.isArray(values) ? values : []);
+		Array.from(el.options).forEach(opt => { opt.selected = selected.has(opt.value); });
+	}
+
+	function readMultiSelect(id) {
+		const el = document.getElementById(id);
+		if (!el) return [];
+		return Array.from(el.selectedOptions).map(o => (o.value || '').trim()).filter(Boolean);
+	}
+
+	function isAllowedBySelection(value, selectedList) {
+		const selected = Array.isArray(selectedList) ? selectedList.filter(Boolean) : [];
+		if (!selected.length || selected.includes('不限')) return true;
+		const text = String(value || '').trim();
+		if (!text) return false;
+		return selected.some(opt => text.includes(opt));
+	}
+
+	function readCardMeta(card, label) {
+		if (!card) return '';
+		const nodes = card.querySelectorAll('.job-meta-text');
+		for (const node of nodes) {
+			const emText = (node.querySelector('em')?.innerText || '').trim();
+			if (!emText.includes(label)) continue;
+			const whole = (node.innerText || '').trim();
+			return whole.replace(emText, '').replace(label, '').replace(/^[:：]/, '').trim();
+		}
+		return '';
+	}
+
+	function detailEducation(detail, fallback = '') {
+		return String(detail?.degreeName || detail?.degree || detail?.education || detail?.eduLevel || fallback || '').trim();
+	}
+
+	function detailExperience(detail, fallback = '') {
+		return String(detail?.experienceName || detail?.experience || detail?.workExperience || detail?.workYear || fallback || '').trim();
+	}
+
+	function passesGlobalRules(data, options = {}) {
+		const title = String(data?.title || '');
+		if (hitKeyword(title, state.rules.blacklist)) return false;
+		if (!options.ignoreDescription) {
+			const desc = String(data?.description || '');
+			if (hitKeyword(desc, state.v19.deepBlacklist)) return false;
+		}
+		if (!options.ignoreEduExp) {
+			if (!isAllowedBySelection(data?.education, state.rules.education)) return false;
+			if (!isAllowedBySelection(data?.experience, state.rules.experience)) return false;
+		}
+		return true;
+	}
 
 	const state = {
 		activeTab: 'manual',
@@ -52,11 +130,14 @@
 		sharedLimits: { maxCount: 20, delayMs: 1200 },
 		rules: {
 			whitelist: [],
-			blacklist: ['外包', '驻场', '兼职']
+			blacklist: STRICT_KICK_KEYWORDS.slice(),
+			education: ['大专'],
+			experience: ['应届/在校', '1年以内', '1-3年']
 		},
 
 		v5: {
 			selectiveMode: true,
+			manualFilterPriority: false,
 			maxBatchCount: 20,
 			applyDelay: 1200,
 			autoFilterEnabled: true,
@@ -70,7 +151,7 @@
 
 		v19: {
 			fetchMode: 'all',
-			deepBlacklist: ['两班倒', '倒班', '单休' ],
+			deepBlacklist: STRICT_KICK_KEYWORDS.slice(),
 			fetchDelay: 1200,
 			maxFetchCount: 20,
 			dataSort: 'rule',
@@ -272,6 +353,11 @@
 		if ((!state.rules.blacklist || state.rules.blacklist.length === 0) && Array.isArray(state.v19.blacklist)) {
 			state.rules.blacklist = state.v19.blacklist.slice();
 		}
+
+		state.rules.blacklist = mergeBaselineKeywords(state.rules.blacklist);
+		state.v19.deepBlacklist = mergeBaselineKeywords(state.v19.deepBlacklist);
+		state.rules.education = normalizeKeywordList(state.rules.education || ['大专']);
+		state.rules.experience = normalizeKeywordList(state.rules.experience || ['应届/在校', '1年以内', '1-3年']);
 	}
 
 	async function saveSettings() {
@@ -399,9 +485,12 @@
 		const setText = (ids, text) => ids.forEach(id => { const el = document.getElementById(id); if (el) el.innerText = text; });
 		const applyEl = document.getElementById('vctrl-apply-counter');
 		if (applyEl) applyEl.innerText = `已投 ${allStats.length}（今 ${today}）`;
+		setText(['vctrl-apply-today'], String(today));
 
 		const jdTotal = (await V19DB.getAllJDs()).length;
+		const historyTotal = (await V19DB.getAllHistoryJDs()).length;
 		setText(['vctrl-jd-total', 'vctrl-jd-total-spider'], String(jdTotal));
+		setText(['vctrl-history-total-header', 'vctrl-history-total-spider'], String(historyTotal));
 
 		setText(['vctrl-radar-count', 'vctrl-radar-count-spider'], String(jdIdSet.size));
 	}
@@ -454,6 +543,8 @@
 
 		setVal('vctrl-global-whitelist', state.rules.whitelist.join(', '));
 		setVal('vctrl-global-blacklist', state.rules.blacklist.join(', '));
+		pickMultiSelect('vctrl-global-education', state.rules.education || []);
+		pickMultiSelect('vctrl-global-experience', state.rules.experience || []);
 		setVal('vctrl-setting-shared-max', state.sharedLimits.maxCount);
 		setVal('vctrl-setting-shared-delay', state.sharedLimits.delayMs);
 		renderAIProfileSelect();
@@ -464,7 +555,7 @@
 		state.v5.autoFilterEnabled = !!document.getElementById('vctrl-auto-filter-toggle')?.checked;
 
 		state.v19.fetchMode = document.getElementById('vctrl-fetch-mode')?.value || 'all';
-		state.v19.deepBlacklist = (document.getElementById('vctrl-fetch-deep-blacklist')?.value || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
+		state.v19.deepBlacklist = mergeBaselineKeywords((document.getElementById('vctrl-fetch-deep-blacklist')?.value || '').split(/[,，]/).map(s => s.trim()).filter(Boolean));
 		state.v19.deliveryPolicy = document.getElementById('vctrl-delivery-policy')?.value || 'keep-last';
 		state.v19.n8nUrl = (document.getElementById('vctrl-n8n-url')?.value || '').trim();
 		state.v19.n8nLoopEnabled = !!document.getElementById('vctrl-n8n-loop-enabled')?.checked;
@@ -472,7 +563,9 @@
 		state.v19.forceSendMaxCount = Math.max(1, parseInt(document.getElementById('vctrl-force-send-max')?.value, 10) || 20);
 
 		state.rules.whitelist = (document.getElementById('vctrl-global-whitelist')?.value || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
-		state.rules.blacklist = (document.getElementById('vctrl-global-blacklist')?.value || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
+		state.rules.blacklist = mergeBaselineKeywords((document.getElementById('vctrl-global-blacklist')?.value || '').split(/[,，]/).map(s => s.trim()).filter(Boolean));
+		state.rules.education = normalizeKeywordList(readMultiSelect('vctrl-global-education'));
+		state.rules.experience = normalizeKeywordList(readMultiSelect('vctrl-global-experience'));
 		state.sharedLimits.maxCount = parseInt(document.getElementById('vctrl-setting-shared-max')?.value, 10) || 20;
 		state.sharedLimits.delayMs = parseInt(document.getElementById('vctrl-setting-shared-delay')?.value, 10) || 1200;
 		state.v5.maxBatchCount = state.sharedLimits.maxCount;
@@ -574,7 +667,13 @@
 		cards.forEach(card => {
 			card.classList.add('vctrl-v21-processed');
 			const title = normalizeTitle(card);
-			if ((state.rules.blacklist || []).some(kw => kw.trim() && title.includes(kw.trim()))) {
+			const education = readCardMeta(card, '学历要求');
+			const experience = readCardMeta(card, '工作经验');
+			const pass = passesGlobalRules({ title, education, experience }, {
+				ignoreDescription: true,
+				ignoreEduExp: !!state.v5.manualFilterPriority
+			});
+			if (!pass) {
 				card.classList.add('vctrl-v21-blocked');
 			}
 
@@ -683,7 +782,10 @@
 				setTimeout(() => {
 					document.getElementById('vctrl-v21-silent-style')?.remove();
 					isProcessingFilter = false;
+					state.v5.manualFilterPriority = !isClear;
+					saveSettings();
 					logMsg(isClear ? '筛选已清空' : '筛选已应用', 'success');
+					document.querySelectorAll('.job-card-new').forEach(c => c.classList.remove('vctrl-v21-processed', 'vctrl-v21-blocked'));
 					processJobCardsForManual();
 				}, 220);
 			});
@@ -765,20 +867,22 @@
 		const seen = new Set();
 		document.querySelectorAll('.job-card-new').forEach(card => {
 			const title = normalizeTitle(card);
-			if ((state.rules.blacklist || []).some(kw => kw.trim() && title.includes(kw.trim()))) return;
+			const education = readCardMeta(card, '学历要求');
+			const experience = readCardMeta(card, '工作经验');
+			if (!passesGlobalRules({ title, education, experience }, { ignoreDescription: true })) return;
 			if (state.v19.fetchMode === 'rule' && !(state.rules.whitelist || []).some(kw => kw.trim() && title.includes(kw.trim()))) return;
 			const company = normalizeCompany(card);
 			const id = jdNetworkMap.get(`${title}|${company}`);
 			if (id && !seen.has(id)) {
 				seen.add(id);
-				targets.push({ title, encryptId: id });
+				targets.push({ title, encryptId: id, education, experience });
 			}
 		});
 
 		for (const id of jdIdSet) {
 			if (seen.has(id)) continue;
 			seen.add(id);
-			targets.push({ title: '雷达岗位', encryptId: id });
+			targets.push({ title: '雷达岗位', encryptId: id, education: '', experience: '' });
 		}
 
 		if (targets.length === 0) {
@@ -816,13 +920,21 @@
 				if (json.code === 0 && json.result) {
 					const detail = json.result;
 					const desc = detail.description || '';
-					const hit = state.v19.deepBlacklist.find(kw => kw.trim() && desc.includes(kw.trim()));
-					if (hit) { dump++; continue; }
+					const education = detailEducation(detail, t.education || '');
+					const experience = detailExperience(detail, t.experience || '');
+					if (!passesGlobalRules({
+						title: detail.title || t.title || '',
+						description: desc,
+						education,
+						experience
+					})) { dump++; continue; }
 					const data = {
 						encryptId: t.encryptId,
 						title: detail.title,
 						company: detail.brand,
 						salary: detail.salary,
+						education,
+						experience,
 						description: desc,
 						skills: detail.skills?.join(', ') || '',
 						timestamp: Date.now(),
@@ -843,6 +955,25 @@
 		logMsg(`--- 结束：新增 ${success}，跳过 ${skip}，排雷 ${dump} ---`, 'success');
 		isFetching = false;
 		toggleSpiderUI('idle');
+	}
+
+	async function cleanMainDBByKeywords(titleKeywords, descKeywords) {
+		const all = await V19DB.getAllJDs();
+		if (!all.length) return { removed: 0, byTitle: 0, byDesc: 0 };
+		let removed = 0;
+		let byTitle = 0;
+		let byDesc = 0;
+		for (const jd of all) {
+			const titleHit = hitKeyword(jd.title || '', titleKeywords);
+			const descHit = titleHit ? '' : hitKeyword(jd.description || '', descKeywords);
+			if (!titleHit && !descHit) continue;
+			const ok = await V19DB.deleteJD(jd.encryptId);
+			if (!ok) continue;
+			removed++;
+			if (titleHit) byTitle++;
+			if (descHit) byDesc++;
+		}
+		return { removed, byTitle, byDesc };
 	}
 
 	window.vCtrl_SendResumeGodMode = async function(encryptId, options = {}) {
@@ -939,7 +1070,13 @@
 		const runToEnd = !!state.v19.n8nLoopEnabled;
 		const loopRounds = runToEnd ? Math.max(1, state.v19.n8nLoopRounds || 1) : 1;
 		const previewSorted = sortJDsByMode(initialData, state.v19.dataSort || 'rule');
-		const previewTargets = keyword.trim() ? previewSorted.filter(jd => (jd.title || '').includes(keyword.trim())) : previewSorted;
+		const previewKeywordTargets = keyword.trim() ? previewSorted.filter(jd => (jd.title || '').includes(keyword.trim())) : previewSorted;
+		const previewTargets = previewKeywordTargets.filter(jd => passesGlobalRules({
+			title: jd.title || '',
+			description: jd.description || '',
+			education: detailEducation(jd.rawJobDetail, jd.education || ''),
+			experience: detailExperience(jd.rawJobDetail, jd.experience || '')
+		}));
 		if (!previewTargets.length) return alert('没有找到符合规则的岗位！');
 
 		const MAX_BATCH_SIZE = 10;
@@ -955,7 +1092,13 @@
 		for (let round = 1; round <= loopRounds; round++) {
 			const current = await V19DB.getAllJDs();
 			const sortedCurrent = sortJDsByMode(current, state.v19.dataSort || 'rule');
-			const targets = keyword.trim() ? sortedCurrent.filter(jd => (jd.title || '').includes(keyword.trim())) : sortedCurrent;
+			const keywordTargets = keyword.trim() ? sortedCurrent.filter(jd => (jd.title || '').includes(keyword.trim())) : sortedCurrent;
+			const targets = keywordTargets.filter(jd => passesGlobalRules({
+				title: jd.title || '',
+				description: jd.description || '',
+				education: detailEducation(jd.rawJobDetail, jd.education || ''),
+				experience: detailExperience(jd.rawJobDetail, jd.experience || '')
+			}));
 			if (!targets.length) {
 				logMsg(`[n8n] 第 ${round}/${loopRounds} 轮：无可处理岗位，提前结束。`, 'warning');
 				break;
@@ -1189,7 +1332,13 @@
 		const keyword = prompt('【一键批量投递 (无脑模式)】\n不经过 n8n，直接强行投递库中所有岗位。\n请输入过滤关键词（留空则全部投递）：', '');
 		if (keyword === null) return;
 
-		const targets = keyword.trim() ? data.filter(jd => (jd.title || '').includes(keyword.trim())) : data;
+		const keywordTargets = keyword.trim() ? data.filter(jd => (jd.title || '').includes(keyword.trim())) : data;
+		const targets = keywordTargets.filter(jd => passesGlobalRules({
+			title: jd.title || '',
+			description: jd.description || '',
+			education: detailEducation(jd.rawJobDetail, jd.education || ''),
+			experience: detailExperience(jd.rawJobDetail, jd.experience || '')
+		}));
 		if (!targets.length) return alert('没有找到符合规则的岗位！');
 		const limit = Math.min(targets.length, Math.max(1, state.v19.forceSendMaxCount || 20));
 		const runTargets = targets.slice(0, limit);
@@ -1342,6 +1491,11 @@
 		document.getElementById('vctrl-btn-view-history').style.display = 'inline-block';
 
 		let data = (await V19DB.getAllJDs()).filter(item => item.deliveryStatus !== 'delivered');
+		const todayStart = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()).getTime();
+		const todayEnd = todayStart + 24 * 60 * 60 * 1000;
+		const todayApplyCount = (await V5DB.getAllStats()).filter(s => s.timestamp >= todayStart && s.timestamp < todayEnd).length;
+		const historyTotal = (await V19DB.getAllHistoryJDs()).length;
+		document.getElementById('vctrl-data-view-tag').innerText = `当前视图：主库｜主库 ${data.length}｜历史 ${historyTotal}｜今投 ${todayApplyCount}`;
 		if (!data.length) {
 			container.innerHTML = '<p style="text-align:center; color:#aaa; margin-top: 50px;">数据库为空，快去汲取数据吧~</p>';
 			return;
@@ -1385,6 +1539,11 @@
 		document.getElementById('vctrl-btn-view-history').style.display = 'none';
 
 		let data = await V19DB.getAllHistoryJDs();
+		const todayStart = new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()).getTime();
+		const todayEnd = todayStart + 24 * 60 * 60 * 1000;
+		const todayApplyCount = (await V5DB.getAllStats()).filter(s => s.timestamp >= todayStart && s.timestamp < todayEnd).length;
+		const mainTotal = (await V19DB.getAllJDs()).length;
+		document.getElementById('vctrl-data-view-tag').innerText = `当前视图：历史库｜历史 ${data.length}｜主库 ${mainTotal}｜今投 ${todayApplyCount}`;
 		if (!data.length) {
 			container.innerHTML = '<p style="text-align:center; color:#aaa; margin-top: 50px;">历史库为空。</p>';
 			return;
@@ -1595,6 +1754,26 @@
 			await renderHistoryList();
 			logMsg('历史库已清空', 'warning');
 		});
+		document.getElementById('vctrl-btn-clean-by-keywords')?.addEventListener('click', async () => {
+			const titleInput = prompt('标题踢出关键词（逗号分隔）\n仅匹配岗位标题，不匹配JD正文。', (state.rules.blacklist || []).join(', '));
+			if (titleInput === null) return;
+			const descInput = prompt('JD正文踢出关键词（逗号分隔）\n仅匹配JD正文，不匹配岗位标题。', (state.v19.deepBlacklist || []).join(', '));
+			if (descInput === null) return;
+
+			const titleKeywords = mergeBaselineKeywords(titleInput.split(/[,，]/).map(s => s.trim()).filter(Boolean));
+			const descKeywords = mergeBaselineKeywords(descInput.split(/[,，]/).map(s => s.trim()).filter(Boolean));
+			state.rules.blacklist = titleKeywords;
+			state.v19.deepBlacklist = descKeywords;
+			await saveSettings();
+			syncFormFromState();
+
+			const result = await cleanMainDBByKeywords(titleKeywords, descKeywords);
+			await refreshCounters();
+			if (state.v19.dataView === 'history') await renderHistoryList();
+			else await renderDataList();
+			logMsg(`规则清理完成：删除 ${result.removed} 条（标题命中 ${result.byTitle}，正文命中 ${result.byDesc}）`, 'success');
+			alert(`规则清理完成\n删除总数：${result.removed}\n标题命中：${result.byTitle}\n正文命中：${result.byDesc}`);
+		});
 		document.getElementById('vctrl-btn-n8n-send')?.addEventListener('click', window.vCtrl_N8nAutoDelivery);
 		document.getElementById('vctrl-btn-batch-send')?.addEventListener('click', window.vCtrl_BatchSendResumes);
 		document.getElementById('vctrl-btn-test-n8n')?.addEventListener('click', testN8nConnection);
@@ -1672,7 +1851,7 @@
 			syncStateFromForm();
 			await saveSettings();
 		};
-		['vctrl-selective-mode','vctrl-auto-filter-toggle','vctrl-fetch-mode','vctrl-fetch-deep-blacklist','vctrl-delivery-policy','vctrl-n8n-url','vctrl-n8n-loop-enabled','vctrl-n8n-loop-rounds','vctrl-force-send-max','vctrl-global-whitelist','vctrl-global-blacklist','vctrl-setting-shared-max','vctrl-setting-shared-delay']
+		['vctrl-selective-mode','vctrl-auto-filter-toggle','vctrl-fetch-mode','vctrl-fetch-deep-blacklist','vctrl-delivery-policy','vctrl-n8n-url','vctrl-n8n-loop-enabled','vctrl-n8n-loop-rounds','vctrl-force-send-max','vctrl-global-whitelist','vctrl-global-blacklist','vctrl-global-education','vctrl-global-experience','vctrl-setting-shared-max','vctrl-setting-shared-delay']
 			.forEach(id => {
 				const el = document.getElementById(id);
 				if (!el) return;
@@ -1738,6 +1917,7 @@
 				<div>
 					<div style="font-weight:bold;color:#d2a64a;">vCtrl v${APP_VERSION}</div>
 					<div id="vctrl-apply-counter" style="font-size:12px;color:#5beaa7;">已投 0（今 0）</div>
+					<div style="font-size:12px;color:#9fd6ba;">今日投递: <span id="vctrl-apply-today">0</span> | 历史记录: <span id="vctrl-history-total-header">0</span></div>
 				</div>
 				<div>
 					<button id="vctrl-btn-toggle" style="background:transparent;border:1px solid #526387;padding:2px 6px;">_</button>
@@ -1767,7 +1947,7 @@
 				<div class="vctrl-section" id="vctrl-section-spider">
 					<div class="blk">
 						<div class="tit">V19 爬取板块</div>
-						<div class="row" style="margin-bottom:6px;"><div>雷达捕获: <span id="vctrl-radar-count">0</span></div><div>纯净JD: <span id="vctrl-jd-total">0</span></div></div>
+						<div class="row" style="margin-bottom:6px;"><div>雷达捕获: <span id="vctrl-radar-count">0</span></div><div>纯净JD: <span id="vctrl-jd-total">0</span></div><div>历史库: <span id="vctrl-history-total-spider">0</span></div></div>
 						<div class="row" style="margin-top:6px;"><button id="vctrl-btn-start-fetch" class="ok">⚡ 开始智能汲取</button><button id="vctrl-btn-view-data" class="warning">打开数据库大盘</button></div>
 						<div id="vctrl-running-controls" class="row" style="display:none;margin-top:6px;">
 							<button id="vctrl-btn-stop-fetch" class="danger">⏹️ 终止任务</button>
@@ -1801,6 +1981,15 @@
 						<div class="tit">统一设置（数据库持久化）</div>
 						<div style="font-size:12px;color:#9fb2d8;line-height:1.5;">全局白/黑名单会同时作用于手动与爬取；20/1200 等参数也统一在此配置。</div>
 						<div class="row" style="margin-top:8px;"><input id="vctrl-global-whitelist" type="text" placeholder="全局白名单（逗号分隔）"><input id="vctrl-global-blacklist" type="text" placeholder="全局标题黑名单（逗号分隔）"></div>
+						<div style="margin-top:8px;font-size:12px;color:#cdb07a;">全局学历/经验规则（可多选；默认学历=大专，经验=应届/在校+1年以内+1-3年）</div>
+						<div class="row" style="margin-top:8px;align-items:stretch;">
+							<select id="vctrl-global-education" multiple size="4" title="可多选学历">
+								${GLOBAL_EDUCATION_OPTIONS.map(v => `<option value="${v}">${v}</option>`).join('')}
+							</select>
+							<select id="vctrl-global-experience" multiple size="5" title="可多选经验">
+								${GLOBAL_EXPERIENCE_OPTIONS.map(v => `<option value="${v}">${v}</option>`).join('')}
+							</select>
+						</div>
 						<div style="margin-top:8px;font-size:12px;color:#cdb07a;">这一行参数同时作用于 手动投递 与 爬取汲取</div>
 						<div class="row" style="margin-top:8px;"><input id="vctrl-setting-shared-max" type="number" min="1" max="500" placeholder="单次上限（通用）"><input id="vctrl-setting-shared-delay" type="number" min="0" max="5000" placeholder="间隔(ms)（通用）"></div>
 						<div style="margin-top:10px;font-size:12px;color:#cdb07a;">n8n 托管投递规则（可选）</div>
@@ -1836,6 +2025,7 @@
 						<select id="vctrl-data-sort" style="max-width:140px;"><option value="rule">规则排序</option><option value="name">按名字</option><option value="time">按获取时间</option></select>
 						<button id="vctrl-btn-view-history" class="gray">查看历史</button>
 						<button id="vctrl-btn-view-main-data" class="gray" style="display:none;">查看主库</button>
+						<button id="vctrl-btn-clean-by-keywords" class="warning">按关键词踢出</button>
 						<button id="vctrl-btn-n8n-send" class="purple">🧠 n8n 智能流</button>
 						<button id="vctrl-btn-batch-send" class="pink">🚀 批量强投</button>
 						<button id="vctrl-btn-view-cloud" class="warning">大盘词云</button>
