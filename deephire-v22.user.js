@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         vCtrl Deephire v3.0
+// @name         vCtrl Deephire v3.1
 // @namespace    http://tampermonkey.net/
-// @version      3.0
+// @version      3.1
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -15,7 +15,7 @@
 
 (function() {
 	'use strict';
-	const APP_VERSION = '3.0';
+	const APP_VERSION = '3.1';
 	const GLOBAL_INIT_KEY = '__vctrl_deephire_singleton_initialized__';
 	if (typeof window.vCtrl_Unload_v21 === 'function') {
 		try { window.vCtrl_Unload_v21(); } catch (e) {}
@@ -979,27 +979,27 @@
 					}));
 					const jobsBrief = payloadJobs.map((j, idx) => `${idx + 1}. [${j.id}] ${j.title || '未知岗位'} | ${j.company || '未知公司'} | ${j.salary || '薪资未知'} | ${(j.descriptionPreview || '描述为空').replace(/\s+/g, ' ').slice(0, 120)}`).join('\n');
 
+					const requestBase = {
+						source: 'vCtrl_V22',
+						payloadVersion: '3.1',
+						mode: 'batch-review',
+						round,
+						batchIndex: b + 1,
+						totalBatches,
+						batchSize,
+						jobsCount: payloadJobs.length,
+						responseFormat: 'json-array',
+						strictResponseSchema: {
+							type: 'array',
+							item: { id: 'string', apply: 'boolean', reason: 'string' }
+						},
+						instruction: '请仅返回 JSON 数组。每一项必须包含 id/apply/reason。id 必须等于输入 jobs 中的 id。不要返回单个总判断对象。'
+					};
+
 					const res = await nativeFetch(url, {
 						method: 'POST',
 						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({
-							source: 'vCtrl_V22',
-							payloadVersion: '3.0',
-							mode: 'batch-review',
-							round,
-							batchIndex: b + 1,
-							totalBatches,
-							batchSize,
-							jobsCount: payloadJobs.length,
-							responseFormat: 'json-array',
-							strictResponseSchema: {
-								type: 'array',
-								item: { id: 'string', apply: 'boolean', reason: 'string' }
-							},
-							instruction: '请仅返回 JSON 数组。每一项必须包含 id/apply/reason。id 必须等于输入 jobs 中的 id。不要返回单个总判断对象。',
-							jobs: payloadJobs,
-							jobsBrief
-						})
+						body: JSON.stringify(Object.assign({}, requestBase, { jobs: payloadJobs, jobsBrief }))
 					});
 					if (!res.ok) throw new Error(`HTTP ${res.status}`);
 					const rawText = await res.text();
@@ -1019,8 +1019,65 @@
 					if (!decisions.length && !globalDecision) throw new Error(`n8n 返回格式无效：未找到决策数组，原始返回片段: ${(rawText || '').slice(0, 220)}`);
 
 					if (globalDecision && batch.length > 1) {
-						logMsg(`[n8n 返回不合规] 第 ${round} 轮第 ${b + 1} 批仅返回单个总判断（无id），本批已跳过，请修正 n8n 返回为数组。`, 'warning');
-						skipped += batch.length;
+						logMsg(`[n8n 返回不合规] 第 ${round} 轮第 ${b + 1} 批仅返回单个总判断（无id），自动降级为逐条复审...`, 'warning');
+						for (const jd of batch) {
+							try {
+								const one = {
+									id: jd.encryptId,
+									encryptId: jd.encryptId,
+									title: jd.title || '',
+									company: jd.company || '',
+									salary: jd.salary || '',
+									skills: jd.skills || '',
+									description: jd.description || '',
+									descriptionPreview: (jd.description || '').slice(0, 300),
+									hasDescription: !!(jd.description && jd.description.trim()),
+									timestamp: jd.timestamp || 0
+								};
+								const resOne = await nativeFetch(url, {
+									method: 'POST',
+									headers: { 'Content-Type': 'application/json' },
+									body: JSON.stringify(Object.assign({}, requestBase, {
+										mode: 'single-review-fallback',
+										batchSize: 1,
+										jobsCount: 1,
+										instruction: '请仅返回 JSON 对象：{"apply":true/false,"reason":"..."}，不要包含其他字段。',
+										job: one,
+										jobs: [one]
+									}))
+								});
+								if (!resOne.ok) throw new Error(`HTTP ${resOne.status}`);
+								const rawOneText = await resOne.text();
+								const parsedOne = tryParseJsonText(rawOneText);
+								let oneDecision = null;
+								if (parsedOne && typeof parsedOne === 'object' && Object.prototype.hasOwnProperty.call(parsedOne, 'apply')) {
+									oneDecision = { apply: parsedOne.apply === true || parsedOne.apply === 'true', reason: parsedOne.reason || '无' };
+								} else {
+									const arrOne = extractDecisionArray(parsedOne ?? rawOneText);
+									if (arrOne.length) {
+										const first = arrOne[0];
+										oneDecision = { apply: first.apply === true || first.apply === 'true', reason: first.reason || '无' };
+									}
+								}
+								if (!oneDecision) {
+									logMsg(`[n8n 单条复审失败] ${jd.title || jd.encryptId} 返回不可解析，已跳过`, 'warning');
+									skipped++;
+									continue;
+								}
+								if (oneDecision.apply) {
+									logMsg(`[大脑决策: 🟢 同意投递] ${jd.title || jd.encryptId}，理由: ${oneDecision.reason}`, 'success');
+									const ok = await window.vCtrl_SendResumeGodMode(jd.encryptId, { moveToHistory: true, archivedBy: 'n8n' });
+									if (ok) success++; else fail++;
+								} else {
+									logMsg(`[大脑决策: 🔴 放弃投递] ${jd.title || jd.encryptId}，理由: ${oneDecision.reason}`, 'warning');
+									rejected++;
+								}
+								await sleep(180 + Math.random() * 220);
+							} catch (innerErr) {
+								logMsg(`[n8n 单条复审异常] ${jd.title || jd.encryptId}: ${String(innerErr?.message || innerErr || '未知错误')}`, 'error');
+								skipped++;
+							}
+						}
 						continue;
 					}
 
