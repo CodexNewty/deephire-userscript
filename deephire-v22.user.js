@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         vCtrl Deephire v2.8
+// @name         vCtrl Deephire v2.9
 // @namespace    http://tampermonkey.net/
-// @version      2.8
+// @version      2.9
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -15,7 +15,7 @@
 
 (function() {
 	'use strict';
-	const APP_VERSION = '2.8';
+	const APP_VERSION = '2.9';
 	const GLOBAL_INIT_KEY = '__vctrl_deephire_singleton_initialized__';
 	if (typeof window.vCtrl_Unload_v21 === 'function') {
 		try { window.vCtrl_Unload_v21(); } catch (e) {}
@@ -943,7 +943,7 @@
 		const btn = document.getElementById('vctrl-btn-n8n-send');
 		if (btn) btn.disabled = true;
 
-		let success = 0, skip = 0, fail = 0;
+		let success = 0, rejected = 0, skipped = 0, fail = 0;
 		for (let round = 1; round <= loopRounds; round++) {
 			const current = await V19DB.getAllJDs();
 			const sortedCurrent = sortJDsByMode(current, state.v19.dataSort || 'rule');
@@ -954,6 +954,7 @@
 			}
 			const batchSize = Math.min(MAX_BATCH_SIZE, targets.length);
 			const totalBatches = Math.ceil(targets.length / batchSize);
+			logMsg(`[n8n] 第 ${round}/${loopRounds} 轮总计 ${targets.length} 条，按每批 ${batchSize} 条，共 ${totalBatches} 批。`, 'info');
 			for (let b = 0; b < totalBatches; b++) {
 				const start = b * batchSize;
 				const end = Math.min(start + batchSize, targets.length);
@@ -1016,7 +1017,7 @@
 
 					if (globalDecision && batch.length > 1) {
 						logMsg(`[n8n 返回不合规] 第 ${round} 轮第 ${b + 1} 批仅返回单个总判断（无id），本批已跳过，请修正 n8n 返回为数组。`, 'warning');
-						skip += batch.length;
+						skipped += batch.length;
 						continue;
 					}
 
@@ -1042,7 +1043,7 @@
 						const decision = decisionMap.get(String(jd.encryptId)) || positionalDecisions.shift() || globalDecision;
 						if (!decision) {
 							logMsg(`[大脑决策: ⚪ 缺失] ${jd.title || jd.encryptId} 未返回决策，默认跳过`, 'warning');
-							skip++;
+							skipped++;
 							continue;
 						}
 						if (decision.apply) {
@@ -1051,14 +1052,14 @@
 							if (ok) success++; else fail++;
 						} else {
 							logMsg(`[大脑决策: 🔴 放弃投递] ${jd.title || jd.encryptId}，理由: ${decision.reason}`, 'warning');
-							skip++;
+							rejected++;
 						}
 					}
 				} catch (e) {
 					const msg = String(e?.message || e || '未知错误');
 					if (msg.includes('返回格式无效')) {
 						logMsg(`[n8n 返回解析失败] 第 ${round} 轮第 ${b + 1} 批失败: ${msg}`, 'warning');
-						skip += batch.length;
+						skipped += batch.length;
 						continue;
 					}
 					logMsg(`[n8n 通信断开] 第 ${round} 轮第 ${b + 1} 批失败: ${msg}`, 'error');
@@ -1075,7 +1076,7 @@
 			btn.innerText = '🧠 n8n 智能流';
 			btn.disabled = false;
 		}
-		alert(`🎉 n8n 托管任务结束！\n✅ 批准投递: ${success} 份\n⏭️ 拒绝投递: ${skip} 份\n❌ 异常中断: ${fail} 份`);
+		alert(`🎉 n8n 托管任务结束！\n✅ 批准投递: ${success} 份\n🚫 拒绝投递: ${rejected} 份\n⏭️ 跳过(返回不合规/缺失): ${skipped} 份\n❌ 异常中断: ${fail} 份`);
 	};
 
 	async function testN8nConnection() {
