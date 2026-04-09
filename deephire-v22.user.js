@@ -779,47 +779,91 @@
 
 		const targets = keyword.trim() ? data.filter(jd => (jd.title || '').includes(keyword.trim())) : data;
 		if (!targets.length) return alert('没有找到符合规则的岗位！');
-		if (!confirm(`⚠️ 警告：即将启动 n8n 智能托管流水线！\n系统将依次把 ${targets.length} 个岗位推给 n8n，由 AI 决定是否投递。\n请确保 n8n 处于 Listen 状态！`)) return;
+
+		const MAX_BATCH_SIZE = 10;
+		const batchSize = Math.min(MAX_BATCH_SIZE, targets.length);
+		const totalBatches = Math.ceil(targets.length / batchSize);
+		if (!confirm(`⚠️ 警告：即将启动 n8n 智能托管流水线！\n总岗位 ${targets.length} 个，将按每批 ${batchSize} 个发送给 n8n（共 ${totalBatches} 批）。\n请确保 n8n 处于 Listen 状态！`)) return;
 
 		const btn = document.getElementById('vctrl-btn-n8n-send');
 		if (btn) btn.disabled = true;
 
 		let success = 0, skip = 0, fail = 0;
-		for (let i = 0; i < targets.length; i++) {
-			const jd = targets[i];
-			if (btn) btn.innerText = `大脑审核中 (${i + 1}/${targets.length})...`;
-			logMsg(`[n8n] 正在将 [${jd.title}] 推送至大脑评估...`, 'info');
+		for (let b = 0; b < totalBatches; b++) {
+			const start = b * batchSize;
+			const end = Math.min(start + batchSize, targets.length);
+			const batch = targets.slice(start, end);
+			if (btn) btn.innerText = `大脑批审中 (${b + 1}/${totalBatches})...`;
+			logMsg(`[n8n] 发送批次 ${b + 1}/${totalBatches}，共 ${batch.length} 条岗位给 AI 审核`, 'info');
 			try {
 				const res = await nativeFetch(url, {
 					method: 'POST',
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({
-						source: 'vCtrl_V21',
-						encryptId: jd.encryptId,
-						title: jd.title,
-						company: jd.company,
-						description: jd.description,
-						skills: jd.skills,
-						salary: jd.salary
+						source: 'vCtrl_V22',
+						mode: 'batch-review',
+						batchIndex: b + 1,
+						totalBatches,
+						batchSize,
+						responseFormat: 'json-array',
+						instruction: '请返回 JSON 数组，每项包含 id/apply/reason。apply 仅可为 true 或 false。',
+						jobs: batch.map(jd => ({
+							id: jd.encryptId,
+							title: jd.title,
+							company: jd.company,
+							description: jd.description,
+							skills: jd.skills,
+							salary: jd.salary
+						}))
 					})
 				});
 				if (!res.ok) throw new Error(`HTTP ${res.status}`);
-				const n8nCmd = await res.json();
-				if (n8nCmd.apply === true || n8nCmd.apply === 'true') {
-					logMsg(`[大脑决策: 🟢 同意投递] 理由: ${n8nCmd.reason || '无'}`, 'success');
-					const ok = await window.vCtrl_SendResumeGodMode(jd.encryptId);
-					if (ok) success++; else fail++;
-				} else {
-					logMsg(`[大脑决策: 🔴 放弃投递] 理由: ${n8nCmd.reason || '无'}`, 'warning');
-					skip++;
+				const raw = await res.json();
+
+				let decisions = [];
+				if (Array.isArray(raw)) decisions = raw;
+				else if (Array.isArray(raw.results)) decisions = raw.results;
+				else if (Array.isArray(raw.data)) decisions = raw.data;
+				else if (raw && (raw.id || raw.encryptId)) decisions = [raw];
+
+				if (!decisions.length) {
+					throw new Error('n8n 返回格式无效：未找到决策数组');
+				}
+
+				const decisionMap = new Map();
+				decisions.forEach(item => {
+					if (!item || typeof item !== 'object') return;
+					const id = String(item.id || item.encryptId || '').trim();
+					if (!id) return;
+					decisionMap.set(id, {
+						apply: item.apply === true || item.apply === 'true',
+						reason: item.reason || '无'
+					});
+				});
+
+				for (const jd of batch) {
+					const decision = decisionMap.get(String(jd.encryptId));
+					if (!decision) {
+						logMsg(`[大脑决策: ⚪ 缺失] ${jd.title || jd.encryptId} 未返回决策，默认跳过`, 'warning');
+						skip++;
+						continue;
+					}
+					if (decision.apply) {
+						logMsg(`[大脑决策: 🟢 同意投递] ${jd.title || jd.encryptId}，理由: ${decision.reason}`, 'success');
+						const ok = await window.vCtrl_SendResumeGodMode(jd.encryptId);
+						if (ok) success++; else fail++;
+					} else {
+						logMsg(`[大脑决策: 🔴 放弃投递] ${jd.title || jd.encryptId}，理由: ${decision.reason}`, 'warning');
+						skip++;
+					}
 				}
 			} catch (e) {
-				logMsg(`[n8n 通信断开] 无法连接本地服务器: ${e.message}`, 'error');
-				fail++;
+				logMsg(`[n8n 通信断开] 第 ${b + 1} 批失败: ${e.message}`, 'error');
+				fail += batch.length;
 				alert('n8n 通信中断，流水线已紧急叫停！请检查 n8n 是否启动。');
 				break;
 			}
-			if (i < targets.length - 1) await sleep(2500 + Math.random() * 2000);
+			if (b < totalBatches - 1) await sleep(1000 + Math.random() * 700);
 		}
 
 		if (btn) {
