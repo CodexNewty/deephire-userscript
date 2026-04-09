@@ -1,19 +1,19 @@
-// ==UserScript==
+
 // @name         Boss直聘自动已读助手 (全真模拟版)
-// @namespace    http://tampermonkey.net/
-// @version      1.3
+
+
 // @description  基于自定义规则处理不合适的沟通消息，全真物理按键模拟防拦截
-// @author       浏览器脚本助手 vCtrl
-// @match        https://www.zhipin.com/web/geek/chat*
-// @grant        none
-// ==/UserScript==
 
-(function() {
-    'use strict';
 
-    // 1. 数据库配置
-    const DB_KEY = 'BOSS_HELPER_RULES';
-    const INITIAL_RULES = [
+
+
+
+
+
+
+
+
+
         "不完全匹配",
         "不够匹配",
         "不合适",
@@ -23,7 +23,7 @@
         "不好意思"
     ];
 
-    let isProcessing = false;
+
 
     // 2. 数据库逻辑
     const db = {
