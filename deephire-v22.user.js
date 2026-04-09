@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         vCtrl Deephire v2.3
+// @name         vCtrl Deephire v2.4
 // @namespace    http://tampermonkey.net/
-// @version      2.3
+// @version      2.4
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -15,8 +15,11 @@
 
 (function() {
 	'use strict';
-	const APP_VERSION = '2.3';
-	const GLOBAL_INIT_KEY = '__vctrl_deephire_v23_initialized__';
+	const APP_VERSION = '2.4';
+	const GLOBAL_INIT_KEY = '__vctrl_deephire_singleton_initialized__';
+	if (typeof window.vCtrl_Unload_v21 === 'function') {
+		try { window.vCtrl_Unload_v21(); } catch (e) {}
+	}
 
 	const PANEL_ID = 'vctrl-v21-panel';
 	const STYLE_ID = 'vctrl-v21-style';
@@ -319,7 +322,12 @@
 	}
 
 	function extractDecisionArray(raw) {
-		if (Array.isArray(raw)) return raw;
+		if (Array.isArray(raw)) {
+			if (raw.length && raw.every(item => item && typeof item === 'object' && item.json && typeof item.json === 'object')) {
+				return raw.map(item => item.json);
+			}
+			return raw;
+		}
 		if (!raw) return [];
 		if (typeof raw === 'string') {
 			const parsed = tryParseJsonText(raw);
@@ -330,6 +338,12 @@
 			if (Array.isArray(raw.data)) return raw.data;
 			if (Array.isArray(raw.items)) return raw.items;
 			if (Array.isArray(raw.output)) return raw.output;
+			if (Array.isArray(raw.body)) return raw.body;
+			if (Array.isArray(raw.response)) return raw.response;
+			if (raw.choices && raw.choices[0]?.message?.content) {
+				const parsed = tryParseJsonText(raw.choices[0].message.content);
+				return extractDecisionArray(parsed);
+			}
 			if (raw.output && typeof raw.output === 'string') {
 				const parsed = tryParseJsonText(raw.output);
 				return extractDecisionArray(parsed);
@@ -975,10 +989,17 @@
 					if (!decisions.length) throw new Error(`n8n 返回格式无效：未找到决策数组，原始返回片段: ${(rawText || '').slice(0, 140)}`);
 
 					const decisionMap = new Map();
+					let positionalDecisions = [];
 					decisions.forEach(item => {
 						if (!item || typeof item !== 'object') return;
 						const id = String(item.id || item.encryptId || '').trim();
-						if (!id) return;
+						if (!id) {
+							positionalDecisions.push({
+								apply: item.apply === true || item.apply === 'true',
+								reason: item.reason || '无'
+							});
+							return;
+						}
 						decisionMap.set(id, {
 							apply: item.apply === true || item.apply === 'true',
 							reason: item.reason || '无'
@@ -986,7 +1007,7 @@
 					});
 
 					for (const jd of batch) {
-						const decision = decisionMap.get(String(jd.encryptId));
+						const decision = decisionMap.get(String(jd.encryptId)) || positionalDecisions.shift();
 						if (!decision) {
 							logMsg(`[大脑决策: ⚪ 缺失] ${jd.title || jd.encryptId} 未返回决策，默认跳过`, 'warning');
 							skip++;
@@ -1002,7 +1023,13 @@
 						}
 					}
 				} catch (e) {
-					logMsg(`[n8n 通信断开] 第 ${round} 轮第 ${b + 1} 批失败: ${e.message}`, 'error');
+					const msg = String(e?.message || e || '未知错误');
+					if (msg.includes('返回格式无效')) {
+						logMsg(`[n8n 返回解析失败] 第 ${round} 轮第 ${b + 1} 批失败: ${msg}`, 'warning');
+						fail += batch.length;
+						continue;
+					}
+					logMsg(`[n8n 通信断开] 第 ${round} 轮第 ${b + 1} 批失败: ${msg}`, 'error');
 					fail += batch.length;
 					alert('n8n 通信中断，流水线已紧急叫停！请检查 n8n 是否启动。');
 					round = loopRounds;
