@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         vCtrl Deephire v2.4
+// @name         vCtrl Deephire v2.5
 // @namespace    http://tampermonkey.net/
-// @version      2.4
+// @version      2.5
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -15,7 +15,7 @@
 
 (function() {
 	'use strict';
-	const APP_VERSION = '2.4';
+	const APP_VERSION = '2.5';
 	const GLOBAL_INIT_KEY = '__vctrl_deephire_singleton_initialized__';
 	if (typeof window.vCtrl_Unload_v21 === 'function') {
 		try { window.vCtrl_Unload_v21(); } catch (e) {}
@@ -985,8 +985,18 @@
 					const rawText = await res.text();
 					const parsed = tryParseJsonText(rawText);
 					const decisions = extractDecisionArray(parsed ?? rawText);
+					let globalDecision = null;
 
-					if (!decisions.length) throw new Error(`n8n 返回格式无效：未找到决策数组，原始返回片段: ${(rawText || '').slice(0, 140)}`);
+					if (!decisions.length && parsed && typeof parsed === 'object') {
+						if (Object.prototype.hasOwnProperty.call(parsed, 'apply')) {
+							globalDecision = {
+								apply: parsed.apply === true || parsed.apply === 'true',
+								reason: parsed.reason || '无'
+							};
+						}
+					}
+
+					if (!decisions.length && !globalDecision) throw new Error(`n8n 返回格式无效：未找到决策数组，原始返回片段: ${(rawText || '').slice(0, 140)}`);
 
 					const decisionMap = new Map();
 					let positionalDecisions = [];
@@ -1007,7 +1017,7 @@
 					});
 
 					for (const jd of batch) {
-						const decision = decisionMap.get(String(jd.encryptId)) || positionalDecisions.shift();
+						const decision = decisionMap.get(String(jd.encryptId)) || positionalDecisions.shift() || globalDecision;
 						if (!decision) {
 							logMsg(`[大脑决策: ⚪ 缺失] ${jd.title || jd.encryptId} 未返回决策，默认跳过`, 'warning');
 							skip++;
@@ -1026,7 +1036,7 @@
 					const msg = String(e?.message || e || '未知错误');
 					if (msg.includes('返回格式无效')) {
 						logMsg(`[n8n 返回解析失败] 第 ${round} 轮第 ${b + 1} 批失败: ${msg}`, 'warning');
-						fail += batch.length;
+						skip += batch.length;
 						continue;
 					}
 					logMsg(`[n8n 通信断开] 第 ${round} 轮第 ${b + 1} 批失败: ${msg}`, 'error');
