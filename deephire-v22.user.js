@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         vCtrl Deephire
 // @namespace    http://tampermonkey.net/
-// @version      3.4
+// @version      3.5
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -15,7 +15,7 @@
 
 (function() {
 	'use strict';
-	const APP_VERSION = '3.4';
+	const APP_VERSION = '3.5';
 	const GLOBAL_INIT_KEY = '__vctrl_deephire_singleton_initialized__';
 	if (typeof window.vCtrl_Unload_v21 === 'function') {
 		try { window.vCtrl_Unload_v21(); } catch (e) {}
