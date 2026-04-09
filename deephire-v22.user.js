@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         vCtrl Deephire V22
+// @name         vCtrl Deephire v2.1
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
+// @version      2.1
 // @description  手动投递板块 + 爬取板块 + 设置持久化（数据库恢复）
 // @author       vCtrl
 // @match        *://www.deephire.cn/jobseeker/*
@@ -11,6 +11,7 @@
 
 (function() {
 	'use strict';
+	const APP_VERSION = '2.1';
 
 	const PANEL_ID = 'vctrl-v21-panel';
 	const STYLE_ID = 'vctrl-v21-style';
@@ -40,6 +41,7 @@
 	const state = {
 		activeTab: 'manual',
 		uiState: { x: '', y: '', w: '380px', h: '640px', collapsed: false },
+		sharedLimits: { maxCount: 20, delayMs: 1200 },
 		rules: {
 			whitelist: [],
 			blacklist: ['外包', '驻场', '兼职']
@@ -237,9 +239,20 @@
 		if (!saved || typeof saved !== 'object') return;
 		if (saved.activeTab) state.activeTab = saved.activeTab;
 		if (saved.uiState) state.uiState = Object.assign(state.uiState, saved.uiState);
+		if (saved.sharedLimits) state.sharedLimits = Object.assign(state.sharedLimits, saved.sharedLimits);
 		if (saved.rules) state.rules = Object.assign(state.rules, saved.rules);
 		if (saved.v5) state.v5 = Object.assign(state.v5, saved.v5);
 		if (saved.v19) state.v19 = Object.assign(state.v19, saved.v19);
+
+		// 兼容旧版本：共享参数未配置时，优先沿用旧的手动参数
+		if (!saved.sharedLimits) {
+			state.sharedLimits.maxCount = state.v5.maxBatchCount || state.v19.maxFetchCount || 20;
+			state.sharedLimits.delayMs = state.v5.applyDelay || state.v19.fetchDelay || 1200;
+		}
+		state.v5.maxBatchCount = state.sharedLimits.maxCount;
+		state.v19.maxFetchCount = state.sharedLimits.maxCount;
+		state.v5.applyDelay = state.sharedLimits.delayMs;
+		state.v19.fetchDelay = state.sharedLimits.delayMs;
 
 		// 兼容旧版本：若还没有全局规则，则从旧字段迁移
 		if ((!state.rules.whitelist || state.rules.whitelist.length === 0) && Array.isArray(state.v19.keywords)) {
@@ -254,6 +267,7 @@
 		await SettingsDB.set('v21_state', {
 			activeTab: state.activeTab,
 			uiState: state.uiState,
+			sharedLimits: state.sharedLimits,
 			rules: state.rules,
 			v5: state.v5,
 			v19: state.v19
@@ -347,10 +361,8 @@
 
 		setVal('vctrl-global-whitelist', state.rules.whitelist.join(', '));
 		setVal('vctrl-global-blacklist', state.rules.blacklist.join(', '));
-		setVal('vctrl-setting-apply-max', state.v5.maxBatchCount);
-		setVal('vctrl-setting-apply-delay', state.v5.applyDelay);
-		setVal('vctrl-setting-fetch-max', state.v19.maxFetchCount);
-		setVal('vctrl-setting-fetch-delay', state.v19.fetchDelay);
+		setVal('vctrl-setting-shared-max', state.sharedLimits.maxCount);
+		setVal('vctrl-setting-shared-delay', state.sharedLimits.delayMs);
 		renderAIProfileSelect();
 	}
 
@@ -365,10 +377,12 @@
 
 		state.rules.whitelist = (document.getElementById('vctrl-global-whitelist')?.value || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
 		state.rules.blacklist = (document.getElementById('vctrl-global-blacklist')?.value || '').split(/[,，]/).map(s => s.trim()).filter(Boolean);
-		state.v5.maxBatchCount = parseInt(document.getElementById('vctrl-setting-apply-max')?.value, 10) || 20;
-		state.v5.applyDelay = parseInt(document.getElementById('vctrl-setting-apply-delay')?.value, 10) || 1200;
-		state.v19.maxFetchCount = parseInt(document.getElementById('vctrl-setting-fetch-max')?.value, 10) || 20;
-		state.v19.fetchDelay = parseInt(document.getElementById('vctrl-setting-fetch-delay')?.value, 10) || 1200;
+		state.sharedLimits.maxCount = parseInt(document.getElementById('vctrl-setting-shared-max')?.value, 10) || 20;
+		state.sharedLimits.delayMs = parseInt(document.getElementById('vctrl-setting-shared-delay')?.value, 10) || 1200;
+		state.v5.maxBatchCount = state.sharedLimits.maxCount;
+		state.v19.maxFetchCount = state.sharedLimits.maxCount;
+		state.v5.applyDelay = state.sharedLimits.delayMs;
+		state.v19.fetchDelay = state.sharedLimits.delayMs;
 	}
 
 	function renderAIProfileSelect() {
@@ -509,7 +523,7 @@
 			return;
 		}
 
-		const limit = Math.min(targets.length, state.v5.maxBatchCount);
+		const limit = Math.min(targets.length, state.sharedLimits.maxCount);
 		let success = 0;
 		for (let i = 0; i < limit; i++) {
 			const card = targets[i];
@@ -525,7 +539,7 @@
 			});
 			success++;
 			logMsg(`投递中 ${i + 1}/${limit}`, 'info');
-			await sleep(state.v5.applyDelay + Math.random() * 300);
+			await sleep(state.sharedLimits.delayMs + Math.random() * 300);
 		}
 		await refreshCounters();
 		logMsg(`投递完成：${success} 份`, 'success');
@@ -683,8 +697,8 @@
 			if (shouldStop) break;
 			while (isPaused && !shouldStop) await sleep(300);
 			if (shouldStop) break;
-			if (success >= state.v19.maxFetchCount) {
-				logMsg(`达到上限 ${state.v19.maxFetchCount}，提前停止。`, 'warning');
+			if (success >= state.sharedLimits.maxCount) {
+				logMsg(`达到上限 ${state.sharedLimits.maxCount}，提前停止。`, 'warning');
 				break;
 			}
 
@@ -727,7 +741,7 @@
 				logMsg(`请求失败: ${e.message}`, 'error');
 			}
 
-			await sleep(state.v19.fetchDelay + Math.random() * 250);
+			await sleep(state.sharedLimits.delayMs + Math.random() * 250);
 		}
 
 		logMsg(`--- 结束：新增 ${success}，跳过 ${skip}，排雷 ${dump} ---`, 'success');
@@ -1455,7 +1469,7 @@
 			syncStateFromForm();
 			await saveSettings();
 		};
-		['vctrl-selective-mode','vctrl-auto-filter-toggle','vctrl-fetch-mode','vctrl-fetch-deep-blacklist','vctrl-delivery-policy','vctrl-n8n-url','vctrl-global-whitelist','vctrl-global-blacklist','vctrl-setting-apply-max','vctrl-setting-apply-delay','vctrl-setting-fetch-max','vctrl-setting-fetch-delay']
+		['vctrl-selective-mode','vctrl-auto-filter-toggle','vctrl-fetch-mode','vctrl-fetch-deep-blacklist','vctrl-delivery-policy','vctrl-n8n-url','vctrl-global-whitelist','vctrl-global-blacklist','vctrl-setting-shared-max','vctrl-setting-shared-delay']
 			.forEach(id => {
 				const el = document.getElementById(id);
 				if (!el) return;
@@ -1518,7 +1532,7 @@
 		panel.innerHTML = `
 			<div class="vctrl-header" id="vctrl-drag">
 				<div>
-					<div style="font-weight:bold;color:#d2a64a;">vCtrl v2.0.0</div>
+					<div style="font-weight:bold;color:#d2a64a;">vCtrl v${APP_VERSION}</div>
 					<div id="vctrl-apply-counter" style="font-size:12px;color:#5beaa7;">已投 0（今 0）</div>
 				</div>
 				<div>
@@ -1583,10 +1597,8 @@
 						<div class="tit">统一设置（数据库持久化）</div>
 						<div style="font-size:12px;color:#9fb2d8;line-height:1.5;">全局白/黑名单会同时作用于手动与爬取；20/1200 等参数也统一在此配置。</div>
 						<div class="row" style="margin-top:8px;"><input id="vctrl-global-whitelist" type="text" placeholder="全局白名单（逗号分隔）"><input id="vctrl-global-blacklist" type="text" placeholder="全局标题黑名单（逗号分隔）"></div>
-						<div style="margin-top:8px;font-size:12px;color:#cdb07a;">上面这一行 20/1200 是 手动投递 参数</div>
-						<div class="row" style="margin-top:8px;"><input id="vctrl-setting-apply-max" type="number" min="1" max="100" placeholder="手动投递单次上限"><input id="vctrl-setting-apply-delay" type="number" min="300" max="5000" placeholder="手动投递间隔(ms)"></div>
-						<div style="margin-top:8px;font-size:12px;color:#cdb07a;">下面这一行 20/1200 是 爬取汲取 参数</div>
-						<div class="row" style="margin-top:8px;"><input id="vctrl-setting-fetch-max" type="number" min="1" max="500" placeholder="爬取单次上限"><input id="vctrl-setting-fetch-delay" type="number" min="0" max="5000" placeholder="爬取间隔(ms)"></div>
+						<div style="margin-top:8px;font-size:12px;color:#cdb07a;">这一行参数同时作用于 手动投递 与 爬取汲取</div>
+						<div class="row" style="margin-top:8px;"><input id="vctrl-setting-shared-max" type="number" min="1" max="500" placeholder="单次上限（通用）"><input id="vctrl-setting-shared-delay" type="number" min="0" max="5000" placeholder="间隔(ms)（通用）"></div>
 						<button id="vctrl-btn-save-settings" class="ok" style="width:100%;margin-top:8px;font-weight:bold;">💾 保存当前配置到数据库</button>
 					</div>
 				</div>
@@ -1694,7 +1706,7 @@
 			initCardObserver();
 			startAutoFilter();
 			await refreshCounters();
-			logMsg('v2.0.0 启动成功：V5 手动板块 + V19 爬取板块。', 'success');
+			logMsg(`v${APP_VERSION} 启动成功：V5 手动板块 + V19 爬取板块。`, 'success');
 		} catch (e) {
 			console.error('[vCtrl V21] 初始化失败', e);
 		}
